@@ -1,4 +1,4 @@
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { getApiBase } from "../utils/apiBase";
 
 export const tabGroups = [
@@ -23,12 +23,39 @@ export const tabGroups = [
     ]
   },
   {
+    title: "Telegram-боты",
+    hint: "Несколько ботов — у каждого своя воронка и настройки",
+    items: [
+      {
+        key: "bots",
+        label: "Мои боты",
+        description: "Добавить бота по токену и переключаться между воронками"
+      }
+    ]
+  },
+  {
     title: "Как работает бот",
     hint: "Сообщения, порядок и напоминания",
     items: [
       { key: "steps", label: "Сообщения шагов", description: "Тексты, картинки и видео в цепочке" },
       { key: "chain", label: "Порядок и кнопки", description: "Последовательность шагов и развилки" },
       { key: "automations", label: "Автонапоминания", description: "Сообщения, если человек пропал" }
+    ]
+  },
+  {
+    title: "После оплаты",
+    hint: "Отдельная цепочка для тех, кто уже оплатил",
+    items: [
+      {
+        key: "post_steps",
+        label: "Сообщения после оплаты",
+        description: "Тексты и кнопки, которые видит покупатель"
+      },
+      {
+        key: "post_chain",
+        label: "Порядок после оплаты",
+        description: "Последовательность шагов и развилки"
+      }
     ]
   },
   {
@@ -50,6 +77,7 @@ export const tabGroups = [
 export const tabMeta = Object.fromEntries(tabGroups.flatMap((group) => group.items.map((item) => [item.key, item])));
 
 const TOKEN_STORAGE = "funnel_admin_access_token";
+const BOT_STORAGE = "funnel_active_bot_id";
 
 export function useFunnelAdmin() {
   const apiBase = computed(() => getApiBase());
@@ -67,8 +95,11 @@ export function useFunnelAdmin() {
   const eventSearch = ref("");
   const adminsList = ref([]);
   const newAdminForm = reactive({ username: "", password: "" });
+  const botForm = reactive({ id: null, name: "", token: "", is_active: true, sort_order: 0 });
 
   const state = reactive({
+    bots: [],
+    activeBotId: null,
     dashboard: null,
     conversions: null,
     accounting: null,
@@ -82,8 +113,16 @@ export function useFunnelAdmin() {
     loading: false,
     error: "",
     success: "",
-    activeTab: "dashboard"
+    activeTab: "dashboard",
+    funnelPhase: "main"
   });
+
+  const FUNNEL_PHASE_BY_TAB = {
+    steps: "main",
+    chain: "main",
+    post_steps: "post_payment",
+    post_chain: "post_payment"
+  };
 
   const chainBranchSourceCode = ref("");
   const branchTypeRef = ref("internal");
@@ -101,6 +140,7 @@ export function useFunnelAdmin() {
     cta_text: "",
     next_step_code: "",
     trigger_keywords: "",
+    funnel_phase: "main",
     sort_order: 0,
     is_active: true
   });
@@ -177,6 +217,42 @@ export function useFunnelAdmin() {
     if (!state.settings.offer) state.settings.offer = {};
     if (!state.settings.offer.delivery) state.settings.offer.delivery = {};
     if (!Array.isArray(state.settings.offer.delivery.buttons)) state.settings.offer.delivery.buttons = [];
+    if (state.settings.offer.delivery.send_before_chain == null) state.settings.offer.delivery.send_before_chain = false;
+    if (!state.settings.subscription_gate) state.settings.subscription_gate = {};
+    const gate = state.settings.subscription_gate;
+    if (gate.skip_for_paid_users == null) gate.skip_for_paid_users = true;
+    if (gate.require_all == null) gate.require_all = true;
+    if (!Array.isArray(gate.channels)) {
+      const legacyId = (gate.channel_id || "").trim();
+      if (legacyId) {
+        gate.channels = [
+          {
+            channel_id: legacyId,
+            title: (gate.subscribe_button_text || "").trim() || "Канал 1",
+            subscribe_url: (gate.subscribe_url || "").trim()
+          }
+        ];
+      } else {
+        gate.channels = [];
+      }
+    }
+    delete gate.channel_id;
+    delete gate.subscribe_url;
+    delete gate.subscribe_button_text;
+  }
+
+  function addSubscriptionChannel() {
+    ensureSettingsShape();
+    state.settings.subscription_gate.channels.push({
+      channel_id: "",
+      title: `Канал ${state.settings.subscription_gate.channels.length + 1}`,
+      subscribe_url: ""
+    });
+  }
+
+  function removeSubscriptionChannel(index) {
+    ensureSettingsShape();
+    state.settings.subscription_gate.channels.splice(index, 1);
   }
 
   function normalizeNullable(payload) {
@@ -187,7 +263,11 @@ export function useFunnelAdmin() {
     );
   }
 
-  const orderedSteps = computed(() => [...state.funnelSteps].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+  const orderedSteps = computed(() =>
+    [...state.funnelSteps]
+      .filter((step) => (step.funnel_phase || "main") === state.funnelPhase)
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+  );
   const nextSortOrder = computed(() => (orderedSteps.value.at(-1)?.sort_order || 0) + 1);
 
   function resetStepDraft() {
@@ -204,10 +284,19 @@ export function useFunnelAdmin() {
       cta_text: "",
       next_step_code: "",
       trigger_keywords: "",
+      funnel_phase: state.funnelPhase,
       sort_order: nextSortOrder.value,
       is_active: true
     });
     resetBranchDraft();
+  }
+
+  function syncFunnelPhaseFromTab(tab = state.activeTab) {
+    const phase = FUNNEL_PHASE_BY_TAB[tab] || "main";
+    if (state.funnelPhase !== phase) {
+      state.funnelPhase = phase;
+      resetStepDraft();
+    }
   }
 
   function resetBranchDraftForSource(sourceStepCode = "") {
@@ -327,9 +416,17 @@ export function useFunnelAdmin() {
     return tabMeta[tab]?.label || tab;
   }
 
-  async function request(path, options = {}) {
+  function botScopedPath(path) {
     const p = path.startsWith("/") ? path : `/${path}`;
-    const url = `${apiBase.value}${p}`;
+    const skipBot =
+      p.startsWith("/auth") || p.startsWith("/bots") || p.startsWith("/leads") || p.startsWith("/admins") || p.startsWith("/uploads");
+    if (skipBot || state.activeBotId == null) return p;
+    const join = p.includes("?") ? "&" : "?";
+    return `${p}${join}bot_id=${encodeURIComponent(state.activeBotId)}`;
+  }
+
+  async function request(path, options = {}) {
+    const url = `${apiBase.value}${botScopedPath(path)}`;
     const hadToken = Boolean(accessToken.value);
     const response = await fetch(url, {
       ...options,
@@ -378,10 +475,127 @@ export function useFunnelAdmin() {
     }
   }
 
+  async function loadBots() {
+    const bots = await request("/bots");
+    state.bots = bots;
+    const stored = typeof localStorage !== "undefined" ? Number(localStorage.getItem(BOT_STORAGE)) : NaN;
+    const pick =
+      bots.find((b) => b.id === stored) ||
+      bots.find((b) => b.is_active) ||
+      bots[0] ||
+      null;
+    if (pick) {
+      state.activeBotId = pick.id;
+      if (typeof localStorage !== "undefined") localStorage.setItem(BOT_STORAGE, String(pick.id));
+    } else {
+      state.activeBotId = null;
+    }
+    return bots;
+  }
+
+  function selectActiveBot(botId) {
+    state.activeBotId = botId;
+    if (typeof localStorage !== "undefined") localStorage.setItem(BOT_STORAGE, String(botId));
+    resetStepDraft();
+    return loadAll();
+  }
+
+  function resetBotForm() {
+    botForm.id = null;
+    botForm.name = "";
+    botForm.token = "";
+    botForm.is_active = true;
+    botForm.sort_order = state.bots.length;
+  }
+
+  function editBot(bot) {
+    botForm.id = bot.id;
+    botForm.name = bot.name;
+    botForm.token = "";
+    botForm.is_active = bot.is_active;
+    botForm.sort_order = bot.sort_order || 0;
+    state.activeTab = "bots";
+  }
+
+  async function saveBot() {
+    state.error = "";
+    state.success = "";
+    const name = botForm.name.trim();
+    if (name.length < 2) {
+      state.error = "Укажите название бота (как вам удобно в панели).";
+      return;
+    }
+    state.loading = true;
+    try {
+      if (botForm.id) {
+        const body = { name, is_active: botForm.is_active, sort_order: botForm.sort_order };
+        if (botForm.token.trim()) body.token = botForm.token.trim();
+        await request(`/bots/${botForm.id}`, { method: "PUT", body: JSON.stringify(body) });
+        state.success = "Бот обновлён. Если меняли токен — polling перезапустится.";
+      } else {
+        const token = botForm.token.trim();
+        if (token.length < 20) {
+          throw new Error("Вставьте токен от @BotFather (длинная строка вида 123456:ABC…).");
+        }
+        const created = await request("/bots", {
+          method: "POST",
+          body: JSON.stringify({ name, token, is_active: botForm.is_active, sort_order: botForm.sort_order })
+        });
+        state.activeBotId = created.id;
+        if (typeof localStorage !== "undefined") localStorage.setItem(BOT_STORAGE, String(created.id));
+        state.success = "Бот добавлен. Можно настраивать его воронку.";
+      }
+      resetBotForm();
+      await loadBots();
+      await loadAll();
+    } catch (error) {
+      state.error = error.message;
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  async function deactivateBot(bot) {
+    if (!confirm(`Отключить бота «${bot.name}»? Он перестанет отвечать в Telegram.`)) return;
+    state.loading = true;
+    state.error = "";
+    try {
+      await request(`/bots/${bot.id}`, { method: "DELETE" });
+      state.success = "Бот отключён.";
+      await loadBots();
+      if (state.activeBotId === bot.id) {
+        state.activeBotId = state.bots[0]?.id || null;
+        if (state.activeBotId && typeof localStorage !== "undefined") {
+          localStorage.setItem(BOT_STORAGE, String(state.activeBotId));
+        }
+      }
+      await loadAll();
+    } catch (error) {
+      state.error = error.message;
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  const activeBot = computed(() => state.bots.find((b) => b.id === state.activeBotId) || null);
+
   async function loadAll() {
     state.loading = true;
     state.error = "";
     try {
+      await loadBots();
+      if (!state.activeBotId) {
+        state.dashboard = null;
+        state.conversions = null;
+        state.accounting = null;
+        state.funnelSteps = [];
+        state.funnelBranches = [];
+        state.automations = [];
+        state.users = [];
+        state.events = [];
+        state.settings = { funnel_copy: {}, offer: { delivery: { buttons: [] } }, diagram_layout: {} };
+        return;
+      }
       const [dashboard, conversions, accounting, funnelSteps, funnelBranches, automations, users, events, settings, leads] =
         await Promise.all([
           request("/dashboard"),
@@ -417,23 +631,24 @@ export function useFunnelAdmin() {
   }
 
   function editStep(step) {
-    Object.assign(stepDraft, { ...step });
+    Object.assign(stepDraft, { ...step, funnel_phase: step.funnel_phase || state.funnelPhase });
     resetBranchDraft();
     state.success = "";
-    state.activeTab = "steps";
+    state.activeTab = state.funnelPhase === "post_payment" ? "post_steps" : "steps";
   }
 
   function createStepAfter(step) {
     resetStepDraft();
     stepDraft.sort_order = (step.sort_order || 0) + 1;
-    state.activeTab = "steps";
+    state.activeTab = state.funnelPhase === "post_payment" ? "post_steps" : "steps";
   }
 
   function editBranch(branch, targetTab = state.activeTab) {
     Object.assign(branchDraft, { ...branch, url: branch.url || "" });
     branchTypeRef.value = branch.url ? "external" : "internal";
-    chainBranchSourceCode.value = targetTab === "chain" ? branch.source_step_code : "";
+    chainBranchSourceCode.value = targetTab === "chain" || targetTab === "post_chain" ? branch.source_step_code : "";
     state.activeTab = targetTab;
+    syncFunnelPhaseFromTab(targetTab);
   }
 
   function editAutomation(item) {
@@ -445,7 +660,8 @@ export function useFunnelAdmin() {
   async function saveStep() {
     state.error = "";
     state.success = "";
-    if (!stepDraft.code) stepDraft.code = generateCode(stepDraft.title, `step_${Date.now()}`);
+    stepDraft.funnel_phase = state.funnelPhase;
+    if (!stepDraft.code) stepDraft.code = generateCode(stepDraft.title, `step_${state.funnelPhase}_${Date.now()}`);
     const payload = JSON.stringify(normalizeNullable(stepDraft));
     if (stepDraft.id) {
       await request(`/funnel-steps/${stepDraft.id}`, { method: "PUT", body: payload });
@@ -487,7 +703,7 @@ export function useFunnelAdmin() {
       state.success = "Кнопка добавлена.";
     }
     await loadAll();
-    if (state.activeTab === "chain") {
+    if (state.activeTab === "chain" || state.activeTab === "post_chain") {
       chainBranchSourceCode.value = "";
       resetBranchDraftForSource("");
     } else {
@@ -514,10 +730,11 @@ export function useFunnelAdmin() {
   }
 
   async function deleteAllSteps() {
-    if (!confirm("Удалить всю цепочку? Отменить будет нельзя.")) return;
+    const label = state.funnelPhase === "post_payment" ? "цепочку после оплаты" : "основную цепочку";
+    if (!confirm(`Удалить всю ${label}? Отменить будет нельзя.`)) return;
     state.error = "";
     state.success = "";
-    await request("/funnel-steps", { method: "DELETE" });
+    await request(`/funnel-steps?funnel_phase=${encodeURIComponent(state.funnelPhase)}`, { method: "DELETE" });
     state.success = "Цепочка очищена.";
     resetStepDraft();
     await loadAll();
@@ -543,6 +760,16 @@ export function useFunnelAdmin() {
     state.error = "";
     state.success = "";
     ensureSettingsShape();
+    if (key === "subscription_gate") {
+      const gate = state.settings.subscription_gate;
+      gate.channels = (gate.channels || [])
+        .map((ch) => ({
+          channel_id: String(ch.channel_id || "").trim(),
+          title: String(ch.title || "").trim() || "Канал",
+          subscribe_url: String(ch.subscribe_url || "").trim()
+        }))
+        .filter((ch) => ch.channel_id);
+    }
     await request(`/settings/${key}`, { method: "PUT", body: JSON.stringify(state.settings[key]) });
     state.success = "Сохранено.";
     await loadAll();
@@ -870,6 +1097,11 @@ export function useFunnelAdmin() {
     state.leads = [];
   }
 
+  watch(
+    () => state.activeTab,
+    (tab) => syncFunnelPhaseFromTab(tab)
+  );
+
   onMounted(() => {
     resetStepDraft();
     tryRestoreSession();
@@ -888,8 +1120,11 @@ export function useFunnelAdmin() {
     eventSearch,
     adminsList,
     newAdminForm,
+    botForm,
+    activeBot,
     tabGroups,
     state,
+    syncFunnelPhaseFromTab,
     chainBranchSourceCode,
     branchTypeRef,
     stepDraft,
@@ -922,6 +1157,12 @@ export function useFunnelAdmin() {
     tabLabel,
     uploadAdminFile,
     loadAll,
+    loadBots,
+    selectActiveBot,
+    saveBot,
+    editBot,
+    resetBotForm,
+    deactivateBot,
     editStep,
     createStepAfter,
     editBranch,
@@ -933,6 +1174,8 @@ export function useFunnelAdmin() {
     deleteAllSteps,
     saveAutomation,
     saveSetting,
+    addSubscriptionChannel,
+    removeSubscriptionChannel,
     addDeliveryButton,
     removeDeliveryButton,
     saveStepOrder,

@@ -14,7 +14,8 @@ import {
   EventsView,
   SettingsView,
   AdminsView,
-  LeadsView
+  LeadsView,
+  BotsView
 } from "./chunks/asyncViews";
 
 const admin = useFunnelAdmin();
@@ -38,15 +39,20 @@ const {
   submitTotp,
   submitSetup2fa,
   cancelTotpStep,
-  newLeadsCount
+  newLeadsCount,
+  activeBot,
+  selectActiveBot
 } = admin;
 
 const viewByTab = {
+  bots: BotsView,
   dashboard: DashboardView,
   conversions: ConversionsView,
   accounting: AccountingView,
   steps: StepsView,
   chain: ChainView,
+  post_steps: StepsView,
+  post_chain: ChainView,
   automations: AutomationsView,
   users: UsersView,
   events: EventsView,
@@ -227,6 +233,20 @@ const viewByTab = {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+}
+.bot-switcher {
+  min-width: 200px;
+  margin: 0;
+}
+.bot-context {
+  margin-top: 8px;
 }
 .nav-badge {
   font-size: 0.6875rem;

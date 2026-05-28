@@ -1,5 +1,5 @@
 <script setup>
-import { inject } from "vue";
+import { computed, inject } from "vue";
 import { FUNNEL_ADMIN } from "../injectionKeys";
 
 const {
@@ -30,6 +30,8 @@ const {
   branchesForStep,
   targetOptionsFor
 } = inject(FUNNEL_ADMIN);
+
+const isPostPayment = computed(() => state.funnelPhase === "post_payment");
 </script>
 
 <template>
@@ -37,11 +39,11 @@ const {
     <article class="panel">
       <div class="section-head">
         <div>
-          <h2>Цепочка по порядку</h2>
+          <h2>{{ isPostPayment ? "Цепочка после оплаты" : "Цепочка по порядку" }}</h2>
           <p class="muted small">Стрелка «Выше / Ниже» меняет очередность. «Сохранить переход» фиксирует основную кнопку.</p>
         </div>
         <div class="chips">
-          <button type="button" class="btn btn--secondary" @click="resetStepDraft(); state.activeTab = 'steps'">Новый шаг</button>
+          <button type="button" class="btn btn--secondary" @click="resetStepDraft(); state.activeTab = isPostPayment ? 'post_steps' : 'steps'">Новый шаг</button>
           <button v-if="orderedSteps.length" type="button" class="btn btn--danger btn--ghost" @click="deleteAllSteps">Очистить всё</button>
         </div>
       </div>
@@ -50,7 +52,7 @@ const {
     <article v-if="!orderedSteps.length" class="panel">
       <h2>Пока пусто</h2>
       <p class="muted">Сначала добавьте шаг с текстом — затем вернитесь сюда.</p>
-      <button type="button" class="btn btn--primary" @click="resetStepDraft(); state.activeTab = 'steps'">Создать первый шаг</button>
+      <button type="button" class="btn btn--primary" @click="resetStepDraft(); state.activeTab = isPostPayment ? 'post_steps' : 'steps'">Создать первый шаг</button>
     </article>
 
     <div v-else class="chain-board">
@@ -116,7 +118,7 @@ const {
               <span>{{ branch.button_text }}</span>
               <span class="muted">{{ branch.url ? "↗ " + branch.url : "→ " + stepTitleByCode(branch.target_step_code) }}</span>
               <span class="chips">
-                <button type="button" class="btn btn--ghost btn--sm" @click="editBranch(branch, 'chain')">Изменить</button>
+                <button type="button" class="btn btn--ghost btn--sm" @click="editBranch(branch, isPostPayment ? 'post_chain' : 'chain')">Изменить</button>
                 <button type="button" class="btn btn--ghost btn--sm" @click="deleteBranch(branch.id)">Удалить</button>
               </span>
             </div>

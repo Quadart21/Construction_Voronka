@@ -1,5 +1,5 @@
 <script setup>
-import { inject } from "vue";
+import { computed, inject } from "vue";
 import { FUNNEL_ADMIN } from "../injectionKeys";
 
 const {
@@ -29,6 +29,8 @@ const {
   deleteStep,
   stepTitleByCode
 } = inject(FUNNEL_ADMIN);
+
+const isPostPayment = computed(() => state.funnelPhase === "post_payment");
 </script>
 
 <template>
@@ -36,8 +38,14 @@ const {
     <article class="panel form-stack simple-editor">
       <div class="section-head">
         <div>
-          <h2>{{ stepDraft.id ? "Редактировать шаг" : "Новый шаг" }}</h2>
-          <p class="muted small">Пользователь увидит только текст, кнопки и медиа — технические поля спрятаны ниже.</p>
+          <h2>{{ stepDraft.id ? "Редактировать шаг" : isPostPayment ? "Новый шаг после оплаты" : "Новый шаг" }}</h2>
+          <p class="muted small">
+            {{
+              isPostPayment
+                ? "Эти сообщения увидят только те, кто уже оплатил. Соберите цепочку в разделе «Порядок после оплаты»."
+                : "Пользователь увидит только текст, кнопки и медиа — технические поля спрятаны ниже."
+            }}
+          </p>
         </div>
         <button v-if="stepDraft.id" type="button" class="btn btn--ghost" @click="resetStepDraft">Очистить и создать новый</button>
       </div>
@@ -90,10 +98,10 @@ const {
             <label class="field">
               <span class="field-label">Роль шага</span>
               <select v-model="stepDraft.step_type">
-                <option value="segment_entry">Старт</option>
+                <option v-if="!isPostPayment" value="segment_entry">Старт</option>
                 <option value="content">Польза / контент</option>
-                <option value="offer">Предложение</option>
-                <option value="payment">Оплата</option>
+                <option value="offer">Предложение / выдача</option>
+                <option v-if="!isPostPayment" value="payment">Оплата</option>
               </select>
             </label>
             <label class="field">
@@ -213,7 +221,7 @@ const {
           <h2>Все шаги</h2>
           <p class="muted small">Менять порядок и переходы удобнее в разделе «Порядок и кнопки».</p>
         </div>
-        <button type="button" class="btn btn--secondary" @click="state.activeTab = 'chain'">Открыть порядок</button>
+        <button type="button" class="btn btn--secondary" @click="state.activeTab = isPostPayment ? 'post_chain' : 'chain'">Открыть порядок</button>
       </div>
       <div v-if="!orderedSteps.length" class="empty-state">Шагов ещё нет — создайте первый выше.</div>
       <div v-else class="step-cards">

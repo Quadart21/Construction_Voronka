@@ -89,6 +89,7 @@ class FunnelStepIn(BaseModel):
     cta_text: str | None = None
     next_step_code: str | None = None
     trigger_keywords: str | None = None
+    funnel_phase: str = "main"
     sort_order: int = 0
     is_active: bool = True
 
@@ -224,3 +225,30 @@ class LeadOut(BaseModel):
 
 class LeadPatchIn(BaseModel):
     status: str = "processed"
+
+
+class TelegramBotIn(BaseModel):
+    name: str
+    token: str
+    is_active: bool = True
+    sort_order: int = 0
+
+
+class TelegramBotUpdateIn(BaseModel):
+    name: str | None = None
+    token: str | None = None
+    is_active: bool | None = None
+    sort_order: int | None = None
+
+
+class TelegramBotOut(BaseModel):
+    id: int
+    name: str
+    username: str | None = None
+    token_masked: str
+    is_active: bool
+    sort_order: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

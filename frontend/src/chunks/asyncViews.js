@@ -21,3 +21,4 @@ export const EventsView = lazyView(() => import("../views/EventsView.vue"));
 export const SettingsView = lazyView(() => import("../views/SettingsView.vue"));
 export const AdminsView = lazyView(() => import("../views/AdminsView.vue"));
 export const LeadsView = lazyView(() => import("../views/LeadsView.vue"));
+export const BotsView = lazyView(() => import("../views/BotsView.vue"));

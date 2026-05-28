@@ -2,7 +2,7 @@ from datetime import datetime
 import shutil
 
 import jwt
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -20,10 +20,28 @@ from backend.admin_auth import (
 )
 from backend.config import settings
 from backend.database import Base, engine, session_scope
-from backend.delivery import send_paid_delivery
+from backend.post_payment import deliver_after_payment
+from backend.runtime import get_bot_application
 from backend.leads_notify import notify_admins_about_lead
 from backend.media import safe_upload_name
-from backend.models import AdminUser, AppSetting, AutomationRule, FollowUpMessage, FunnelBranch, FunnelEvent, FunnelStep, Lead, PaymentRecord, Segment, User
+from backend.bot_manager import reload_bot
+from backend.deps import mask_bot_token, resolve_bot_id
+from backend.models import (
+    AdminUser,
+    AppSetting,
+    AutomationRule,
+    FollowUpMessage,
+    FunnelBranch,
+    FunnelEvent,
+    FunnelStep,
+    Lead,
+    PaymentRecord,
+    Segment,
+    TelegramBot,
+    User,
+)
+from backend.multi_bot_migrate import ensure_multi_bot_schema
+from backend.seed import seed_bot_defaults
 from backend.schemas import (
     AccountingSummary,
     AdminCreateIn,
@@ -42,6 +60,9 @@ from backend.schemas import (
     LeadCreateIn,
     LeadOut,
     LeadPatchIn,
+    TelegramBotIn,
+    TelegramBotOut,
+    TelegramBotUpdateIn,
     FunnelBranchIn,
     FunnelBranchOut,
     FunnelStepIn,
@@ -92,6 +113,10 @@ def ensure_runtime_columns() -> None:
     if "trigger_keywords" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE funnel_steps ADD COLUMN trigger_keywords TEXT"))
+    if "funnel_phase" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE funnel_steps ADD COLUMN funnel_phase VARCHAR(32) DEFAULT 'main'"))
+            connection.execute(text("UPDATE funnel_steps SET funnel_phase = 'main' WHERE funnel_phase IS NULL OR funnel_phase = ''"))
 
 
 def payment_payload_meta(payload: dict | None) -> dict:
@@ -127,6 +152,7 @@ def startup() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     ensure_runtime_columns()
+    ensure_multi_bot_schema()
     seed_defaults()
     with session_scope() as session:
         bootstrap_env_admin_if_empty(session)
@@ -134,7 +160,96 @@ def startup() -> None:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "time": datetime.utcnow().isoformat()}
+    return {"ok": True, "version": settings.app_version, "time": datetime.utcnow().isoformat()}
+
+
+def _bot_to_out(bot: TelegramBot) -> TelegramBotOut:
+    return TelegramBotOut(
+        id=bot.id,
+        name=bot.name,
+        username=bot.username,
+        token_masked=mask_bot_token(bot.token),
+        is_active=bot.is_active,
+        sort_order=bot.sort_order,
+        created_at=bot.created_at,
+    )
+
+
+async def _fetch_bot_username(token: str) -> str | None:
+    token = token.strip()
+    if not token:
+        return None
+    try:
+        async with Bot(token) as bot:
+            me = await bot.get_me()
+            return me.username
+    except Exception:
+        return None
+
+
+@app.get("/api/bots", response_model=list[TelegramBotOut], dependencies=[Depends(inject_admin_ctx)])
+def list_bots():
+    with session_scope() as session:
+        bots = list(session.scalars(select(TelegramBot).order_by(TelegramBot.sort_order, TelegramBot.id)))
+        return [_bot_to_out(bot) for bot in bots]
+
+
+@app.post("/api/bots", response_model=TelegramBotOut, dependencies=[Depends(inject_admin_ctx)])
+async def create_bot(payload: TelegramBotIn, background_tasks: BackgroundTasks):
+    name = payload.name.strip()
+    token = payload.token.strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Укажите название бота")
+    if len(token) < 20:
+        raise HTTPException(status_code=400, detail="Укажите корректный токен от @BotFather")
+    username = await _fetch_bot_username(token)
+    with session_scope() as session:
+        entity = TelegramBot(name=name[:128], token=token, username=username, is_active=payload.is_active, sort_order=payload.sort_order)
+        session.add(entity)
+        session.flush()
+        bot_id = int(entity.id)
+        seed_bot_defaults(bot_id)
+        result = _bot_to_out(entity)
+    background_tasks.add_task(reload_bot, bot_id)
+    return result
+
+
+@app.put("/api/bots/{bot_id}", response_model=TelegramBotOut, dependencies=[Depends(inject_admin_ctx)])
+async def update_bot(bot_id: int, payload: TelegramBotUpdateIn, background_tasks: BackgroundTasks):
+    with session_scope() as session:
+        entity = session.get(TelegramBot, bot_id)
+        if entity is None:
+            raise HTTPException(status_code=404, detail="Бот не найден")
+        if payload.name is not None:
+            entity.name = payload.name.strip()[:128]
+        if payload.token is not None:
+            token = payload.token.strip()
+            if len(token) < 20:
+                raise HTTPException(status_code=400, detail="Укажите корректный токен")
+            entity.token = token
+            entity.username = await _fetch_bot_username(token)
+        if payload.is_active is not None:
+            entity.is_active = payload.is_active
+        if payload.sort_order is not None:
+            entity.sort_order = payload.sort_order
+        session.flush()
+        result = _bot_to_out(entity)
+    background_tasks.add_task(reload_bot, bot_id)
+    return result
+
+
+@app.delete("/api/bots/{bot_id}", dependencies=[Depends(inject_admin_ctx)])
+async def delete_bot(bot_id: int, background_tasks: BackgroundTasks):
+    with session_scope() as session:
+        entity = session.get(TelegramBot, bot_id)
+        if entity is None:
+            raise HTTPException(status_code=404, detail="Бот не найден")
+        others = session.scalar(select(func.count(TelegramBot.id)).where(TelegramBot.id != bot_id)) or 0
+        if others < 1:
+            raise HTTPException(status_code=400, detail="Нельзя удалить последнего бота")
+        entity.is_active = False
+    background_tasks.add_task(reload_bot, bot_id)
+    return {"ok": True}
 
 
 @app.post("/api/public/leads", response_model=LeadOut)
@@ -306,18 +421,18 @@ async def upload_media(file: UploadFile = File(...)):
 
 
 @app.get("/api/dashboard", response_model=DashboardStats, dependencies=[Depends(inject_admin_ctx)])
-def dashboard():
-    return get_dashboard_stats()
+def dashboard(bot_id: int = Depends(resolve_bot_id)):
+    return get_dashboard_stats(bot_id)
 
 
 @app.get("/api/conversions", response_model=ConversionReport, dependencies=[Depends(inject_admin_ctx)])
-def conversions():
-    return get_conversion_report()
+def conversions(bot_id: int = Depends(resolve_bot_id)):
+    return get_conversion_report(bot_id)
 
 
 @app.get("/api/accounting", response_model=AccountingSummary, dependencies=[Depends(inject_admin_ctx)])
-def accounting():
-    return get_accounting_summary()
+def accounting(bot_id: int = Depends(resolve_bot_id)):
+    return get_accounting_summary(bot_id)
 
 
 @app.post("/api/webhooks/platega")
@@ -336,6 +451,7 @@ async def platega_webhook(
     external_status = str(payload.get("status") or "").upper()
     status = PLATEGA_STATUS_MAP.get(external_status, external_status.lower() or "unknown")
     delivery_target: int | None = None
+    delivery_bot_id: int | None = None
 
     with session_scope() as session:
         record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == transaction_id)) if transaction_id else None
@@ -348,8 +464,15 @@ async def platega_webhook(
         record.currency = str(payload.get("currency") or record.currency or "RUB")
         record.payload = {**(record.payload or {}), "webhook": payload}
 
-        user = session.get(User, record.user_id) if record.user_id else session.scalar(select(User).where(User.telegram_id == record.telegram_id))
+        record_bot_id = int(record.bot_id or 1)
         payment_meta = payment_payload_meta(record.payload)
+        if payment_meta.get("bot_id"):
+            record_bot_id = int(payment_meta["bot_id"])
+        user = (
+            session.get(User, record.user_id)
+            if record.user_id
+            else session.scalar(select(User).where(User.bot_id == record_bot_id, User.telegram_id == record.telegram_id))
+        )
         paid_step = str(payment_meta.get("step") or user.current_step if user else "payment").strip() or "payment"
         if user and status == "paid":
             user.is_customer = True
@@ -357,17 +480,32 @@ async def platega_webhook(
                 log_event(session, user, "payment_paid", paid_step, {"transaction_id": transaction_id})
             if not (record.payload or {}).get("delivery_sent_at"):
                 delivery_target = user.telegram_id
+                delivery_bot_id = record_bot_id
         elif user and status in {"failed", "refunded"} and previous_status != status:
             log_event(session, user, f"payment_{status}", paid_step, {"transaction_id": transaction_id})
+            delivery_bot_id = None
+        else:
+            delivery_bot_id = None
 
-        offer = get_setting(session, "offer") if delivery_target else {}
+        offer = get_setting(session, "offer", record_bot_id) if delivery_target else {}
 
-    if delivery_target and settings.bot_token:
-        async with Bot(settings.bot_token) as bot:
-            await send_paid_delivery(bot, chat_id=delivery_target, offer=offer)
+    if delivery_target and delivery_bot_id:
+        application = get_bot_application(delivery_bot_id)
+        bot_token = None
+        if application is None:
+            with session_scope() as session:
+                bot_row = session.get(TelegramBot, delivery_bot_id)
+                bot_token = bot_row.token if bot_row else settings.bot_token
+        if application is not None:
+            await deliver_after_payment(application=application, chat_id=delivery_target, telegram_id=delivery_target, offer=offer)
+        elif bot_token:
+            from backend.delivery import send_paid_delivery
+
+            async with Bot(bot_token) as bot:
+                await send_paid_delivery(bot, chat_id=delivery_target, offer=offer)
         with session_scope() as session:
             record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == transaction_id))
-            user = session.scalar(select(User).where(User.telegram_id == delivery_target))
+            user = session.scalar(select(User).where(User.bot_id == delivery_bot_id, User.telegram_id == delivery_target))
             if record is not None:
                 record.payload = {**(record.payload or {}), "delivery_sent_at": datetime.utcnow().isoformat()}
             if user is not None:
@@ -378,25 +516,25 @@ async def platega_webhook(
 
 
 @app.get("/api/segments", response_model=list[SegmentOut], dependencies=[Depends(inject_admin_ctx)])
-def list_segments():
+def list_segments(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        return list(session.scalars(select(Segment).order_by(Segment.sort_order, Segment.id)))
+        return list(session.scalars(select(Segment).where(Segment.bot_id == bot_id).order_by(Segment.sort_order, Segment.id)))
 
 
 @app.post("/api/segments", response_model=SegmentOut, dependencies=[Depends(inject_admin_ctx)])
-def create_segment(payload: SegmentIn):
+def create_segment(payload: SegmentIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        entity = Segment(**payload.model_dump())
+        entity = Segment(bot_id=bot_id, **payload.model_dump())
         session.add(entity)
         session.flush()
         return entity
 
 
 @app.put("/api/segments/{segment_id}", response_model=SegmentOut, dependencies=[Depends(inject_admin_ctx)])
-def update_segment(segment_id: int, payload: SegmentIn):
+def update_segment(segment_id: int, payload: SegmentIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         entity = session.get(Segment, segment_id)
-        if entity is None:
+        if entity is None or entity.bot_id != bot_id:
             raise HTTPException(status_code=404, detail="Segment not found")
         for key, value in payload.model_dump().items():
             setattr(entity, key, value)
@@ -405,25 +543,29 @@ def update_segment(segment_id: int, payload: SegmentIn):
 
 
 @app.get("/api/follow-ups", response_model=list[FollowUpOut], dependencies=[Depends(inject_admin_ctx)])
-def list_followups():
+def list_followups(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        return list(session.scalars(select(FollowUpMessage).order_by(FollowUpMessage.delay_hours, FollowUpMessage.id)))
+        return list(
+            session.scalars(
+                select(FollowUpMessage).where(FollowUpMessage.bot_id == bot_id).order_by(FollowUpMessage.delay_hours, FollowUpMessage.id)
+            )
+        )
 
 
 @app.post("/api/follow-ups", response_model=FollowUpOut, dependencies=[Depends(inject_admin_ctx)])
-def create_followup(payload: FollowUpIn):
+def create_followup(payload: FollowUpIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        entity = FollowUpMessage(**payload.model_dump())
+        entity = FollowUpMessage(bot_id=bot_id, **payload.model_dump())
         session.add(entity)
         session.flush()
         return entity
 
 
 @app.put("/api/follow-ups/{follow_up_id}", response_model=FollowUpOut, dependencies=[Depends(inject_admin_ctx)])
-def update_followup(follow_up_id: int, payload: FollowUpIn):
+def update_followup(follow_up_id: int, payload: FollowUpIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         entity = session.get(FollowUpMessage, follow_up_id)
-        if entity is None:
+        if entity is None or entity.bot_id != bot_id:
             raise HTTPException(status_code=404, detail="Follow-up not found")
         for key, value in payload.model_dump().items():
             setattr(entity, key, value)
@@ -432,93 +574,132 @@ def update_followup(follow_up_id: int, payload: FollowUpIn):
 
 
 @app.get("/api/funnel-steps", response_model=list[FunnelStepOut], dependencies=[Depends(inject_admin_ctx)])
-def list_funnel_steps():
+def list_funnel_steps(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        return list(session.scalars(select(FunnelStep).order_by(FunnelStep.sort_order, FunnelStep.id)))
+        return list(
+            session.scalars(select(FunnelStep).where(FunnelStep.bot_id == bot_id).order_by(FunnelStep.sort_order, FunnelStep.id))
+        )
 
 
 @app.post("/api/funnel-steps", response_model=FunnelStepOut, dependencies=[Depends(inject_admin_ctx)])
-def create_funnel_step(payload: FunnelStepIn):
+def create_funnel_step(payload: FunnelStepIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        if session.scalar(select(FunnelStep.id).where(FunnelStep.code == payload.code)):
+        if session.scalar(select(FunnelStep.id).where(FunnelStep.bot_id == bot_id, FunnelStep.code == payload.code)):
             raise HTTPException(status_code=409, detail="Funnel step code already exists")
-        entity = FunnelStep(**payload.model_dump())
+        entity = FunnelStep(bot_id=bot_id, **payload.model_dump())
         session.add(entity)
         session.flush()
         return entity
 
 
 @app.put("/api/funnel-steps/{step_id}", response_model=FunnelStepOut, dependencies=[Depends(inject_admin_ctx)])
-def update_funnel_step(step_id: int, payload: FunnelStepIn):
+def update_funnel_step(step_id: int, payload: FunnelStepIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         entity = session.get(FunnelStep, step_id)
-        if entity is None:
+        if entity is None or entity.bot_id != bot_id:
             raise HTTPException(status_code=404, detail="Funnel step not found")
-        if session.scalar(select(FunnelStep.id).where(FunnelStep.code == payload.code, FunnelStep.id != step_id)):
+        if session.scalar(
+            select(FunnelStep.id).where(FunnelStep.bot_id == bot_id, FunnelStep.code == payload.code, FunnelStep.id != step_id)
+        ):
             raise HTTPException(status_code=409, detail="Funnel step code already exists")
         old_code = entity.code
         for key, value in payload.model_dump().items():
             setattr(entity, key, value)
         if old_code != entity.code:
-            for branch in session.scalars(select(FunnelBranch).where(FunnelBranch.source_step_code == old_code)):
+            for branch in session.scalars(
+                select(FunnelBranch).where(FunnelBranch.bot_id == bot_id, FunnelBranch.source_step_code == old_code)
+            ):
                 branch.source_step_code = entity.code
-            for branch in session.scalars(select(FunnelBranch).where(FunnelBranch.target_step_code == old_code)):
+            for branch in session.scalars(
+                select(FunnelBranch).where(FunnelBranch.bot_id == bot_id, FunnelBranch.target_step_code == old_code)
+            ):
                 branch.target_step_code = entity.code
-            for rule in session.scalars(select(AutomationRule).where(AutomationRule.trigger_step == old_code)):
+            for rule in session.scalars(
+                select(AutomationRule).where(AutomationRule.bot_id == bot_id, AutomationRule.trigger_step == old_code)
+            ):
                 rule.trigger_step = entity.code
-            for rule in session.scalars(select(AutomationRule).where(AutomationRule.target_step_code == old_code)):
+            for rule in session.scalars(
+                select(AutomationRule).where(AutomationRule.bot_id == bot_id, AutomationRule.target_step_code == old_code)
+            ):
                 rule.target_step_code = entity.code
-            for user in session.scalars(select(User).where(User.current_step == old_code)):
+            for user in session.scalars(select(User).where(User.bot_id == bot_id, User.current_step == old_code)):
                 user.current_step = entity.code
-            for event in session.scalars(select(FunnelEvent).where(FunnelEvent.step == old_code)):
+            for event in session.scalars(
+                select(FunnelEvent)
+                .join(User, User.id == FunnelEvent.user_id)
+                .where(User.bot_id == bot_id, FunnelEvent.step == old_code)
+            ):
                 event.step = entity.code
         session.flush()
         return entity
 
 
 @app.delete("/api/funnel-steps/{step_id}", dependencies=[Depends(inject_admin_ctx)])
-def delete_funnel_step(step_id: int):
+def delete_funnel_step(step_id: int, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         entity = session.get(FunnelStep, step_id)
-        if entity is None:
+        if entity is None or entity.bot_id != bot_id:
             raise HTTPException(status_code=404, detail="Funnel step not found")
         code = entity.code
-        session.execute(delete(FunnelBranch).where(FunnelBranch.source_step_code == code))
-        session.execute(delete(FunnelBranch).where(FunnelBranch.target_step_code == code))
-        for step in session.scalars(select(FunnelStep).where(FunnelStep.next_step_code == code)):
+        session.execute(delete(FunnelBranch).where(FunnelBranch.bot_id == bot_id, FunnelBranch.source_step_code == code))
+        session.execute(delete(FunnelBranch).where(FunnelBranch.bot_id == bot_id, FunnelBranch.target_step_code == code))
+        for step in session.scalars(select(FunnelStep).where(FunnelStep.bot_id == bot_id, FunnelStep.next_step_code == code)):
             step.next_step_code = None
         session.delete(entity)
         return {"ok": True}
 
 
 @app.delete("/api/funnel-steps", dependencies=[Depends(inject_admin_ctx)])
-def delete_all_funnel_steps():
+def delete_all_funnel_steps(funnel_phase: str | None = None, bot_id: int = Depends(resolve_bot_id)):
+    phase = (funnel_phase or "").strip() or None
     with session_scope() as session:
-        session.execute(delete(FunnelBranch))
-        session.execute(delete(FunnelStep))
+        if phase:
+            steps = list(session.scalars(select(FunnelStep).where(FunnelStep.bot_id == bot_id, FunnelStep.funnel_phase == phase)))
+            codes = [step.code for step in steps]
+            if codes:
+                session.execute(
+                    delete(FunnelBranch).where(FunnelBranch.bot_id == bot_id, FunnelBranch.source_step_code.in_(codes))
+                )
+                session.execute(
+                    delete(FunnelBranch).where(FunnelBranch.bot_id == bot_id, FunnelBranch.target_step_code.in_(codes))
+                )
+            session.execute(delete(FunnelStep).where(FunnelStep.bot_id == bot_id, FunnelStep.funnel_phase == phase))
+        else:
+            session.execute(delete(FunnelBranch).where(FunnelBranch.bot_id == bot_id))
+            session.execute(delete(FunnelStep).where(FunnelStep.bot_id == bot_id))
         return {"ok": True}
 
 
 @app.get("/api/funnel-branches", response_model=list[FunnelBranchOut], dependencies=[Depends(inject_admin_ctx)])
-def list_funnel_branches():
+def list_funnel_branches(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        return list(session.scalars(select(FunnelBranch).order_by(FunnelBranch.source_step_code, FunnelBranch.sort_order, FunnelBranch.id)))
+        return list(
+            session.scalars(
+                select(FunnelBranch)
+                .where(FunnelBranch.bot_id == bot_id)
+                .order_by(FunnelBranch.source_step_code, FunnelBranch.sort_order, FunnelBranch.id)
+            )
+        )
 
 
 @app.post("/api/funnel-branches", response_model=FunnelBranchOut, dependencies=[Depends(inject_admin_ctx)])
-def create_funnel_branch(payload: FunnelBranchIn):
+def create_funnel_branch(payload: FunnelBranchIn, bot_id: int = Depends(resolve_bot_id)):
+    if payload.url and not str(payload.url).strip().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Ссылка должна начинаться с http:// или https://")
     with session_scope() as session:
-        entity = FunnelBranch(**payload.model_dump())
+        entity = FunnelBranch(bot_id=bot_id, **payload.model_dump())
         session.add(entity)
         session.flush()
         return entity
 
 
 @app.put("/api/funnel-branches/{branch_id}", response_model=FunnelBranchOut, dependencies=[Depends(inject_admin_ctx)])
-def update_funnel_branch(branch_id: int, payload: FunnelBranchIn):
+def update_funnel_branch(branch_id: int, payload: FunnelBranchIn, bot_id: int = Depends(resolve_bot_id)):
+    if payload.url and not str(payload.url).strip().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Ссылка должна начинаться с http:// или https://")
     with session_scope() as session:
         entity = session.get(FunnelBranch, branch_id)
-        if entity is None:
+        if entity is None or entity.bot_id != bot_id:
             raise HTTPException(status_code=404, detail="Funnel branch not found")
         for key, value in payload.model_dump().items():
             setattr(entity, key, value)
@@ -527,35 +708,39 @@ def update_funnel_branch(branch_id: int, payload: FunnelBranchIn):
 
 
 @app.delete("/api/funnel-branches/{branch_id}", dependencies=[Depends(inject_admin_ctx)])
-def delete_funnel_branch(branch_id: int):
+def delete_funnel_branch(branch_id: int, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         entity = session.get(FunnelBranch, branch_id)
-        if entity is None:
+        if entity is None or entity.bot_id != bot_id:
             raise HTTPException(status_code=404, detail="Funnel branch not found")
         session.delete(entity)
         return {"ok": True}
 
 
 @app.get("/api/automations", response_model=list[AutomationRuleOut], dependencies=[Depends(inject_admin_ctx)])
-def list_automations():
+def list_automations(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        return list(session.scalars(select(AutomationRule).order_by(AutomationRule.inactivity_hours, AutomationRule.id)))
+        return list(
+            session.scalars(
+                select(AutomationRule).where(AutomationRule.bot_id == bot_id).order_by(AutomationRule.inactivity_hours, AutomationRule.id)
+            )
+        )
 
 
 @app.post("/api/automations", response_model=AutomationRuleOut, dependencies=[Depends(inject_admin_ctx)])
-def create_automation(payload: AutomationRuleIn):
+def create_automation(payload: AutomationRuleIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        entity = AutomationRule(**payload.model_dump())
+        entity = AutomationRule(bot_id=bot_id, **payload.model_dump())
         session.add(entity)
         session.flush()
         return entity
 
 
 @app.put("/api/automations/{automation_id}", response_model=AutomationRuleOut, dependencies=[Depends(inject_admin_ctx)])
-def update_automation(automation_id: int, payload: AutomationRuleIn):
+def update_automation(automation_id: int, payload: AutomationRuleIn, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         entity = session.get(AutomationRule, automation_id)
-        if entity is None:
+        if entity is None or entity.bot_id != bot_id:
             raise HTTPException(status_code=404, detail="Automation not found")
         for key, value in payload.model_dump().items():
             setattr(entity, key, value)
@@ -564,17 +749,18 @@ def update_automation(automation_id: int, payload: AutomationRuleIn):
 
 
 @app.get("/api/users", response_model=list[UserOut], dependencies=[Depends(inject_admin_ctx)])
-def list_users():
+def list_users(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        return list(session.scalars(select(User).order_by(User.created_at.desc()).limit(200)))
+        return list(session.scalars(select(User).where(User.bot_id == bot_id).order_by(User.created_at.desc()).limit(200)))
 
 
 @app.get("/api/events", response_model=list[EventOut], dependencies=[Depends(inject_admin_ctx)])
-def list_events():
+def list_events(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         rows = session.execute(
             select(FunnelEvent, User.telegram_id, User.full_name)
             .join(User, User.id == FunnelEvent.user_id)
+            .where(User.bot_id == bot_id)
             .order_by(FunnelEvent.created_at.desc())
             .limit(200)
         ).all()
@@ -593,14 +779,14 @@ def list_events():
 
 
 @app.get("/api/settings", dependencies=[Depends(inject_admin_ctx)])
-def get_settings():
+def get_settings(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        settings_rows = list(session.scalars(select(AppSetting).order_by(AppSetting.key)))
+        settings_rows = list(session.scalars(select(AppSetting).where(AppSetting.bot_id == bot_id).order_by(AppSetting.key)))
         return {row.key: row.value for row in settings_rows}
 
 
 @app.put("/api/settings/{key}", dependencies=[Depends(inject_admin_ctx)])
-def update_settings(key: str, value: dict):
+def update_settings(key: str, value: dict, bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
-        entity = set_setting(session, key, value)
+        entity = set_setting(session, key, value, bot_id)
         return {"key": entity.key, "value": entity.value}

@@ -11,7 +11,7 @@ def delivery_keyboard(delivery: dict) -> InlineKeyboardMarkup | None:
     for item in delivery.get("buttons") or []:
         text = str(item.get("text") or "").strip()
         url = str(item.get("url") or "").strip()
-        if text and url:
+        if text and url.startswith(("http://", "https://")):
             buttons.append([InlineKeyboardButton(text, url=url)])
     return InlineKeyboardMarkup(buttons) if buttons else None
 

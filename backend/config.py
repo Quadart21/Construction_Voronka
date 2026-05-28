@@ -2,11 +2,22 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_ROOT = Path(__file__).resolve().parent.parent
+_VERSION_FILE = _ROOT / "VERSION"
+
+
+def read_app_version() -> str:
+    try:
+        return _VERSION_FILE.read_text(encoding="utf-8").strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Instagram Telegram Funnel"
+    app_version: str = read_app_version()
     debug: bool = False
     api_host: str = "0.0.0.0"
     api_port: int = 8000

@@ -1,10 +1,22 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
+
+
+class TelegramBot(Base):
+    __tablename__ = "telegram_bots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    token: Mapped[str] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
 class AdminUser(Base):
@@ -21,9 +33,11 @@ class AdminUser(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("bot_id", "telegram_id", name="uq_users_bot_telegram"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
+    telegram_id: Mapped[int] = mapped_column(Integer, index=True)
     username: Mapped[str | None] = mapped_column(String(128))
     full_name: Mapped[str] = mapped_column(String(255), default="")
     segment_key: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -53,9 +67,11 @@ class FunnelEvent(Base):
 
 class Segment(Base):
     __tablename__ = "segments"
+    __table_args__ = (UniqueConstraint("bot_id", "key", name="uq_segments_bot_key"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
+    key: Mapped[str] = mapped_column(String(64), index=True)
     title: Mapped[str] = mapped_column(String(255))
     promise: Mapped[str] = mapped_column(Text)
     micro_value_title: Mapped[str] = mapped_column(String(255))
@@ -68,9 +84,11 @@ class Segment(Base):
 
 class FollowUpMessage(Base):
     __tablename__ = "follow_up_messages"
+    __table_args__ = (UniqueConstraint("bot_id", "code", name="uq_followups_bot_code"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
+    code: Mapped[str] = mapped_column(String(64), index=True)
     title: Mapped[str] = mapped_column(String(255))
     body: Mapped[str] = mapped_column(Text)
     delay_hours: Mapped[int] = mapped_column(Integer)
@@ -80,9 +98,11 @@ class FollowUpMessage(Base):
 
 class FunnelStep(Base):
     __tablename__ = "funnel_steps"
+    __table_args__ = (UniqueConstraint("bot_id", "code", name="uq_funnel_steps_bot_code"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
+    code: Mapped[str] = mapped_column(String(64), index=True)
     title: Mapped[str] = mapped_column(String(255))
     body: Mapped[str] = mapped_column(Text)
     step_type: Mapped[str] = mapped_column(String(32), default="content")
@@ -93,6 +113,7 @@ class FunnelStep(Base):
     cta_text: Mapped[str | None] = mapped_column(String(128))
     next_step_code: Mapped[str | None] = mapped_column(String(64), index=True)
     trigger_keywords: Mapped[str | None] = mapped_column(Text)
+    funnel_phase: Mapped[str] = mapped_column(String(32), default="main", index=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -101,6 +122,7 @@ class FunnelBranch(Base):
     __tablename__ = "funnel_branches"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
     source_step_code: Mapped[str] = mapped_column(String(64), index=True)
     button_text: Mapped[str] = mapped_column(String(128))
     target_step_code: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
@@ -111,9 +133,11 @@ class FunnelBranch(Base):
 
 class AutomationRule(Base):
     __tablename__ = "automation_rules"
+    __table_args__ = (UniqueConstraint("bot_id", "code", name="uq_automations_bot_code"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
+    code: Mapped[str] = mapped_column(String(64), index=True)
     trigger_type: Mapped[str] = mapped_column(String(32), default="inactivity")
     trigger_step: Mapped[str | None] = mapped_column(String(64), index=True)
     inactivity_hours: Mapped[int] = mapped_column(Integer, default=24)
@@ -128,6 +152,7 @@ class PaymentRecord(Base):
     __tablename__ = "payment_records"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
     telegram_id: Mapped[int] = mapped_column(Integer, index=True)
     full_name: Mapped[str] = mapped_column(String(255), default="")
@@ -145,9 +170,11 @@ class PaymentRecord(Base):
 
 class AppSetting(Base):
     __tablename__ = "app_settings"
+    __table_args__ = (UniqueConstraint("bot_id", "key", name="uq_app_settings_bot_key"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("telegram_bots.id"), index=True, default=1)
+    key: Mapped[str] = mapped_column(String(128), index=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
 
 

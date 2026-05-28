@@ -3,24 +3,17 @@ import asyncio
 import uvicorn
 
 from backend.api import app
-from backend.bot import build_bot_application
+from backend.bot_manager import start_all_bots, stop_all_bots
 from backend.config import settings
 
 
-async def run_bot() -> None:
-    if not settings.bot_token:
-        return
-    application = build_bot_application()
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+async def run_bots() -> None:
+    await start_all_bots()
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        await stop_all_bots()
 
 
 async def run_api() -> None:
@@ -30,7 +23,7 @@ async def run_api() -> None:
 
 
 async def main() -> None:
-    await asyncio.gather(run_api(), run_bot())
+    await asyncio.gather(run_api(), run_bots())
 
 
 if __name__ == "__main__":

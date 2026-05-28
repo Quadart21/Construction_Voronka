@@ -17,12 +17,21 @@ from backend.payments import create_platega_payment_link
 from sqlalchemy import select
 
 from backend.models import AutomationRule, FollowUpMessage, User
+from backend.bot_context import bot_id_from
+from backend.subscription_gate import (
+    check_user_subscriptions,
+    gate_is_active,
+    normalize_gate,
+    subscription_check_hint,
+    subscription_keyboard,
+)
 from backend.services import (
     create_payment_record,
     get_automation_rules,
     get_branch_by_id,
     get_branches_for_step,
     get_first_funnel_step,
+    get_first_post_payment_step,
     get_followups,
     get_or_create_user,
     get_segment_entry_step,
@@ -31,8 +40,15 @@ from backend.services import (
     get_step_by_trigger,
     get_step_by_id,
     log_event,
+    resolve_user_context_step,
     should_rate_limit,
+    user_funnel_phase,
 )
+
+
+def is_valid_button_url(url: str | None) -> bool:
+    value = str(url or "").strip()
+    return value.startswith("http://") or value.startswith("https://")
 
 
 def managed_messages(application: Application) -> dict[int, int]:
@@ -104,8 +120,7 @@ async def send_media_with_cleanup(
 def branch_keyboard(step, branches: list) -> InlineKeyboardMarkup | None:
     rows = []
     for branch in branches:
-        if branch.url:
-            # External button
+        if branch.url and is_valid_button_url(branch.url):
             rows.append([InlineKeyboardButton(branch.button_text, url=branch.url)])
         elif branch.target_step_code:
             # Internal button
@@ -119,10 +134,11 @@ def branch_keyboard(step, branches: list) -> InlineKeyboardMarkup | None:
 
 
 async def render_first_step(application: Application, chat_id: int, telegram_user) -> None:
+    bot_id = bot_id_from(application)
     with session_scope() as session:
-        user = get_or_create_user(session, telegram_user)
+        user = get_or_create_user(session, telegram_user, bot_id)
         user.segment_key = None
-        step = get_segment_entry_step(session) or get_first_funnel_step(session)
+        step = get_segment_entry_step(session, bot_id) or get_first_funnel_step(session, bot_id)
         if step is None:
             await send_replacing_previous(
                 application=application,
@@ -131,7 +147,7 @@ async def render_first_step(application: Application, chat_id: int, telegram_use
                 protect_content=settings.content_protection_enabled,
             )
             return
-        branches = get_branches_for_step(session, step.code)
+        branches = get_branches_for_step(session, step.code, bot_id)
         log_event(session, user, "start", step.code, {"source": "telegram_start", "step_title": step.title})
         text = html_message(step.title, step.body)
         media_type = step.media_type
@@ -172,12 +188,13 @@ async def render_step(
     event_type: str = "step_opened",
     event_payload: dict | None = None,
 ) -> None:
+    bot_id = bot_id_from(application)
     with session_scope() as session:
-        user = get_or_create_user(session, telegram_user)
-        step = get_step_by_code(session, step_code)
+        user = get_or_create_user(session, telegram_user, bot_id)
+        step = get_step_by_code(session, step_code, bot_id)
         if step is None:
             return
-        branches = get_branches_for_step(session, step.code)
+        branches = get_branches_for_step(session, step.code, bot_id)
         log_event(session, user, event_type, step.code, event_payload or {"step_title": step.title})
         text = html_message(step.title, step.body)
     keyboard = branch_keyboard(step, branches)
@@ -207,17 +224,84 @@ async def render_step(
     )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def subscription_gate_for_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[dict, bool]:
+    bot_id = bot_id_from(context.application)
     with session_scope() as session:
-        user = get_or_create_user(session, update.effective_user)
+        user = get_or_create_user(session, update.effective_user, bot_id)
+        gate = normalize_gate(get_setting(session, "subscription_gate", bot_id))
+        if not gate_is_active(gate):
+            return gate, True
+        if gate["skip_for_paid_users"] and user.is_customer:
+            return gate, True
+    subscribed, _missing = await check_user_subscriptions(
+        context.application.bot,
+        gate,
+        update.effective_user.id,
+    )
+    return gate, subscribed
+
+
+async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    gate, subscribed = await subscription_gate_for_user(update, context)
+    if subscribed:
+        return True
+    await send_replacing_previous(
+        application=context.application,
+        chat_id=update.effective_chat.id,
+        text=html_message("Нужна подписка", gate["message"]),
+        reply_markup=subscription_keyboard(gate),
+        parse_mode=ParseMode.HTML,
+        protect_content=settings.content_protection_enabled,
+    )
+    return False
+
+
+async def enter_funnel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bot_id = bot_id_from(context.application)
+    post_step_code = None
+    with session_scope() as session:
+        user = get_or_create_user(session, update.effective_user, bot_id)
         telegram_id = user.telegram_id
+        if user.is_customer:
+            post_step = get_first_post_payment_step(session, bot_id)
+            if post_step is not None:
+                post_step_code = post_step.code
+    if post_step_code:
+        await schedule_nurture_for_user(context.application, telegram_id)
+        await render_step(
+            context.application,
+            update.effective_chat.id,
+            post_step_code,
+            update.effective_user,
+            event_type="start",
+        )
+        return
     await schedule_nurture_for_user(context.application, telegram_id)
     await render_first_step(context.application, update.effective_chat.id, update.effective_user)
 
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_subscribed(update, context):
+        return
+    await enter_funnel(update, context)
+
+
+async def on_check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    gate, subscribed = await subscription_gate_for_user(update, context)
+    if subscribed:
+        await query.answer("Подписка подтверждена. Открываю бот.")
+        await enter_funnel(update, context)
+        return
+    _, missing = await check_user_subscriptions(context.application.bot, gate, update.effective_user.id)
+    hint = subscription_check_hint(gate, missing)
+    await query.answer(hint[:200], show_alert=True)
+
+
 async def navigation_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    bot_id = bot_id_from(context.application)
     with session_scope() as session:
-        user = get_or_create_user(session, update.effective_user)
+        user = get_or_create_user(session, update.effective_user, bot_id)
         if should_rate_limit(user, settings.anti_spam_window_seconds, settings.anti_spam_burst_limit):
             log_event(session, user, "anti_spam_triggered", "rate_limited", {})
             rate_limited = True
@@ -248,14 +332,17 @@ async def send_unavailable_transition(update: Update, context: ContextTypes.DEFA
 async def on_branch_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    if not await ensure_subscribed(update, context):
+        return
     try:
         branch_id = int(query.data.split(":", 1)[1])
     except (TypeError, ValueError):
         await send_unavailable_transition(update, context)
         return
+    bot_id = bot_id_from(context.application)
     with session_scope() as session:
-        branch = get_branch_by_id(session, branch_id)
-        target = get_step_by_code(session, branch.target_step_code) if branch else None
+        branch = get_branch_by_id(session, branch_id, bot_id)
+        target = get_step_by_code(session, branch.target_step_code, bot_id) if branch else None
         step_code = target.code if target else None
     if not step_code:
         await send_unavailable_transition(update, context)
@@ -271,14 +358,17 @@ async def on_branch_navigation(update: Update, context: ContextTypes.DEFAULT_TYP
 async def on_next_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    if not await ensure_subscribed(update, context):
+        return
     try:
         step_id = int(query.data.split(":", 1)[1])
     except (TypeError, ValueError):
         await send_unavailable_transition(update, context)
         return
+    bot_id = bot_id_from(context.application)
     with session_scope() as session:
-        step = get_step_by_id(session, step_id)
-        target = get_step_by_code(session, step.next_step_code) if step and step.next_step_code else None
+        step = get_step_by_id(session, step_id, bot_id)
+        target = get_step_by_code(session, step.next_step_code, bot_id) if step and step.next_step_code else None
         step_code = target.code if target else None
     if not step_code:
         await send_unavailable_transition(update, context)
@@ -294,9 +384,12 @@ async def on_next_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def on_step_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    if not await ensure_subscribed(update, context):
+        return
     step_code = query.data.split(":", 1)[1]
+    bot_id = bot_id_from(context.application)
     with session_scope() as session:
-        target = get_step_by_code(session, step_code)
+        target = get_step_by_code(session, step_code, bot_id)
         resolved_step_code = target.code if target else None
     if not resolved_step_code:
         await send_unavailable_transition(update, context)
@@ -309,14 +402,15 @@ async def on_step_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_code: str | None = None, step_id: int | None = None) -> bool:
+    bot_id = bot_id_from(context.application)
     with session_scope() as session:
-        user = get_or_create_user(session, update.effective_user)
-        step = get_step_by_id(session, step_id) if step_id is not None else get_step_by_code(session, step_code or "")
+        user = get_or_create_user(session, update.effective_user, bot_id)
+        step = get_step_by_id(session, step_id, bot_id) if step_id is not None else get_step_by_code(session, step_code or "", bot_id)
         if step is None:
             return False
         resolved_step_code = step.code
-        payment_payload = f"telegram_id={user.telegram_id};segment={user.segment_key};step={resolved_step_code}"
-        offer = get_setting(session, "offer")
+        payment_payload = f"bot_id={bot_id};telegram_id={user.telegram_id};segment={user.segment_key};step={resolved_step_code}"
+        offer = get_setting(session, "offer", bot_id)
         payment = create_platega_payment_link(
             amount=int(offer.get("amount", 9900)),
             currency=str(offer.get("currency", "RUB")),
@@ -332,7 +426,15 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             amount=int(offer.get("amount", 9900)),
             currency=str(offer.get("currency", "RUB")),
             description=str(offer.get("description", "Оплата оффера")),
-            payload={**payment, "local": {"telegram_id": user.telegram_id, "segment": user.segment_key, "step": resolved_step_code}},
+            payload={
+                **payment,
+                "local": {
+                    "bot_id": bot_id,
+                    "telegram_id": user.telegram_id,
+                    "segment": user.segment_key,
+                    "step": resolved_step_code,
+                },
+            },
         )
         log_event(session, user, "payment_started", resolved_step_code, {"transaction_id": payment.get("transactionId")})
         text = html_message(
@@ -354,6 +456,8 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def on_payment_by_step_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    if not await ensure_subscribed(update, context):
+        return
     try:
         step_id = int(query.data.split(":", 1)[1])
     except (TypeError, ValueError):
@@ -366,14 +470,19 @@ async def on_payment_by_step_id(update: Update, context: ContextTypes.DEFAULT_TY
 async def on_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    if not await ensure_subscribed(update, context):
+        return
     if not await send_payment_link(update, context, step_code=query.data.split(":", 1)[1]):
         await send_unavailable_transition(update, context)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     incoming_text = update.effective_message.text or ""
+    if not await ensure_subscribed(update, context):
+        return
+    bot_id = bot_id_from(context.application)
     with session_scope() as session:
-        user = get_or_create_user(session, update.effective_user)
+        user = get_or_create_user(session, update.effective_user, bot_id)
         if should_rate_limit(user, settings.anti_spam_window_seconds, settings.anti_spam_burst_limit):
             log_event(session, user, "anti_spam_triggered", "rate_limited", {"text": incoming_text[:80]}, update_current=False)
             await send_replacing_previous(
@@ -383,7 +492,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 protect_content=settings.content_protection_enabled,
             )
             return
-        trigger_step = get_step_by_trigger(session, incoming_text)
+        phase = user_funnel_phase(user)
+        trigger_step = get_step_by_trigger(session, incoming_text, bot_id, funnel_phase=phase)
         if trigger_step is not None:
             step_code = trigger_step.code
             telegram_id = user.telegram_id
@@ -392,9 +502,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             step_code = None
             telegram_id = user.telegram_id
             trigger_payload = None
-            current_step = get_step_by_code(session, user.current_step) or get_segment_entry_step(session) or get_first_funnel_step(session)
-            branches = get_branches_for_step(session, current_step.code) if current_step is not None else []
-            copy = get_setting(session, "funnel_copy")
+            current_step = resolve_user_context_step(session, user, bot_id)
+            branches = get_branches_for_step(session, current_step.code, bot_id) if current_step is not None else []
+            copy = get_setting(session, "funnel_copy", bot_id)
             text = copy.get("invalid_input", "Я тебя не понял, нажми на одну из кнопок ниже 👇")
             keyboard = branch_keyboard(current_step, branches) if current_step is not None else None
             log_event(
@@ -428,8 +538,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def send_follow_up(context: ContextTypes.DEFAULT_TYPE) -> None:
     telegram_id = context.job.data["telegram_id"]
     follow_up_id = context.job.data["follow_up_id"]
+    bot_id = int(context.job.data["bot_id"])
     with session_scope() as session:
-        user = session.scalar(select(User).where(User.telegram_id == telegram_id))
+        user = session.scalar(select(User).where(User.bot_id == bot_id, User.telegram_id == telegram_id))
         if user is None:
             return
         message = session.scalar(select(FollowUpMessage).where(FollowUpMessage.id == follow_up_id))
@@ -448,25 +559,27 @@ async def send_follow_up(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def schedule_nurture_for_user(application: Application, telegram_id: int) -> None:
     if not settings.nurture_enabled:
         return
+    bot_id = bot_id_from(application)
     for job in application.job_queue.jobs():
-        if job.name and job.name.startswith(f"followup:{telegram_id}:"):
+        if job.name and job.name.startswith(f"followup:{bot_id}:{telegram_id}:"):
             job.schedule_removal()
     with session_scope() as session:
-        followups = get_followups(session)
+        followups = get_followups(session, bot_id)
     for item in followups:
         application.job_queue.run_once(
             send_follow_up,
             when=item.delay_hours * 3600,
-            data={"telegram_id": telegram_id, "follow_up_id": item.id},
-            name=f"followup:{telegram_id}:{item.code}",
+            data={"telegram_id": telegram_id, "follow_up_id": item.id, "bot_id": bot_id},
+            name=f"followup:{bot_id}:{telegram_id}:{item.code}",
         )
 
 
 async def send_inactivity_bonus(context: ContextTypes.DEFAULT_TYPE) -> None:
     telegram_id = context.job.data["telegram_id"]
     rule_id = context.job.data["rule_id"]
+    bot_id = int(context.job.data["bot_id"])
     with session_scope() as session:
-        user = session.scalar(select(User).where(User.telegram_id == telegram_id))
+        user = session.scalar(select(User).where(User.bot_id == bot_id, User.telegram_id == telegram_id))
         if user is None or user.is_customer:
             return
         rule = session.scalar(select(AutomationRule).where(AutomationRule.id == rule_id, AutomationRule.is_active.is_(True)))
@@ -485,12 +598,14 @@ async def send_inactivity_bonus(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def schedule_inactivity_automations(application: Application, telegram_id: int, current_step: str) -> None:
+    bot_id = bot_id_from(application)
     for job in application.job_queue.jobs():
-        if job.name and job.name.startswith(f"inactivity:{telegram_id}:"):
+        if job.name and job.name.startswith(f"inactivity:{bot_id}:{telegram_id}:"):
             job.schedule_removal()
     with session_scope() as session:
         rules = [
-            rule for rule in get_automation_rules(session)
+            rule
+            for rule in get_automation_rules(session, bot_id)
             if rule.trigger_type == "inactivity" and (rule.trigger_step is None or rule.trigger_step == current_step)
         ]
     for rule in rules:
@@ -500,18 +615,22 @@ async def schedule_inactivity_automations(application: Application, telegram_id:
             data={
                 "telegram_id": telegram_id,
                 "rule_id": rule.id,
+                "bot_id": bot_id,
             },
-            name=f"inactivity:{telegram_id}:{rule.code}",
+            name=f"inactivity:{bot_id}:{telegram_id}:{rule.code}",
         )
 
 
-async def post_init(application: Application) -> None:
+async def post_init(application: Application, bot_id: int) -> None:
+    application.bot_data["bot_id"] = int(bot_id)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
-def build_bot_application() -> Application:
-    app = Application.builder().token(settings.bot_token).post_init(post_init).build()
+def build_bot_application(token: str, bot_id: int) -> Application:
+    app = Application.builder().token(token).post_init(lambda application: post_init(application, bot_id)).build()
+    app.bot_data["bot_id"] = int(bot_id)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(on_check_subscription, pattern=r"^check_sub$"))
     app.add_handler(CallbackQueryHandler(on_branch_navigation, pattern=r"^branch:"))
     app.add_handler(CallbackQueryHandler(on_next_navigation, pattern=r"^next:"))
     app.add_handler(CallbackQueryHandler(on_step_navigation, pattern=r"^goto:"))

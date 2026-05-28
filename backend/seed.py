@@ -104,31 +104,44 @@ DEFAULT_SETTINGS = {
         },
     },
     "payment": {"provider": "platega", "enabled": True},
+    "subscription_gate": {
+        "enabled": False,
+        "channels": [],
+        "require_all": True,
+        "message": "Чтобы пользоваться ботом, подпишитесь на наши каналы — там выходят материалы и анонсы.",
+        "not_subscribed_hint": "Подписка пока не видна. Откройте каналы, подпишитесь и нажмите «Проверить».",
+        "check_button_text": "Я подписался — проверить",
+        "skip_for_paid_users": True,
+    },
 }
 
 
-def seed_defaults() -> None:
+def seed_bot_defaults(bot_id: int) -> None:
     with session_scope() as session:
-        if not session.scalar(select(Segment.id).limit(1)):
+        if not session.scalar(select(Segment.id).where(Segment.bot_id == bot_id).limit(1)):
             for segment in DEFAULT_SEGMENTS:
-                session.add(Segment(**segment))
-        if not session.scalar(select(FollowUpMessage.id).limit(1)):
+                session.add(Segment(bot_id=bot_id, **segment))
+        if not session.scalar(select(FollowUpMessage.id).where(FollowUpMessage.bot_id == bot_id).limit(1)):
             for item in DEFAULT_FOLLOWUPS:
-                session.add(FollowUpMessage(**item))
-        if not session.scalar(select(FunnelStep.id).limit(1)):
+                session.add(FollowUpMessage(bot_id=bot_id, **item))
+        if not session.scalar(select(FunnelStep.id).where(FunnelStep.bot_id == bot_id).limit(1)):
             for item in DEFAULT_STEPS:
-                session.add(FunnelStep(**item))
-        if not session.scalar(select(FunnelBranch.id).limit(1)):
+                session.add(FunnelStep(bot_id=bot_id, **item))
+        if not session.scalar(select(FunnelBranch.id).where(FunnelBranch.bot_id == bot_id).limit(1)):
             for item in DEFAULT_BRANCHES:
-                session.add(FunnelBranch(**item))
-        if not session.scalar(select(AutomationRule.id).limit(1)):
+                session.add(FunnelBranch(bot_id=bot_id, **item))
+        if not session.scalar(select(AutomationRule.id).where(AutomationRule.bot_id == bot_id).limit(1)):
             for item in DEFAULT_AUTOMATIONS:
-                session.add(AutomationRule(**item))
+                session.add(AutomationRule(bot_id=bot_id, **item))
         for key, value in DEFAULT_SETTINGS.items():
-            existing = session.scalar(select(AppSetting).where(AppSetting.key == key))
+            existing = session.scalar(select(AppSetting).where(AppSetting.bot_id == bot_id, AppSetting.key == key))
             if existing is None:
-                session.add(AppSetting(key=key, value=value))
-        welcome = session.scalar(select(FunnelStep).where(FunnelStep.code == "welcome", FunnelStep.step_type == "segment_entry"))
+                session.add(AppSetting(bot_id=bot_id, key=key, value=value))
+        welcome = session.scalar(
+            select(FunnelStep).where(
+                FunnelStep.bot_id == bot_id, FunnelStep.code == "welcome", FunnelStep.step_type == "segment_entry"
+            )
+        )
         if welcome is not None:
             if welcome.title == "Выбор направления":
                 welcome.title = "Старт"
@@ -136,3 +149,13 @@ def seed_defaults() -> None:
                 welcome.body = "Привет! Начнем с первого полезного шага."
             if not welcome.next_step_code:
                 welcome.next_step_code = "micro_value"
+
+
+def seed_defaults() -> None:
+    from backend.models import TelegramBot
+    from backend.multi_bot_migrate import ensure_multi_bot_schema
+
+    ensure_multi_bot_schema()
+    with session_scope() as session:
+        for bot_id in session.scalars(select(TelegramBot.id)):
+            seed_bot_defaults(int(bot_id))

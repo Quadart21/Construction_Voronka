@@ -2,12 +2,115 @@
 import { inject } from "vue";
 import { FUNNEL_ADMIN } from "../injectionKeys";
 
-const { state, saveSetting, uploadAdminFile, isImagePreview, isVideoPreview, mediaPreviewUrl, mediaTypeLabel, addDeliveryButton, removeDeliveryButton } =
-  inject(FUNNEL_ADMIN);
+const {
+  state,
+  saveSetting,
+  uploadAdminFile,
+  isImagePreview,
+  isVideoPreview,
+  mediaPreviewUrl,
+  mediaTypeLabel,
+  addDeliveryButton,
+  removeDeliveryButton,
+  addSubscriptionChannel,
+  removeSubscriptionChannel
+} = inject(FUNNEL_ADMIN);
 </script>
 
 <template>
   <section class="stack">
+    <article class="panel form-stack">
+      <div class="section-head">
+        <div>
+          <h2>Обязательная подписка</h2>
+          <p class="muted small">
+            Настройка для <strong>текущего бота</strong> в переключателе сверху. Пока человек не подпишется на указанные каналы, бот не
+            пустит в воронку. Бот должен быть <strong>администратором</strong> каждого канала.
+          </p>
+        </div>
+        <button type="button" class="btn btn--primary" @click="saveSetting('subscription_gate')">Сохранить</button>
+      </div>
+
+      <label class="field field--inline-check">
+        <span class="field-label">Включить проверку подписки</span>
+        <select v-model="state.settings.subscription_gate.enabled">
+          <option :value="false">Выключено</option>
+          <option :value="true">Включено</option>
+        </select>
+      </label>
+
+      <label class="field field--inline-check">
+        <span class="field-label">Условие доступа</span>
+        <select v-model="state.settings.subscription_gate.require_all">
+          <option :value="true">Подписка на все каналы из списка</option>
+          <option :value="false">Достаточно любого одного канала</option>
+        </select>
+      </label>
+
+      <div class="channels-block">
+        <div class="section-head">
+          <h3 class="channels-block__title">Каналы для проверки</h3>
+          <button type="button" class="btn btn--ghost btn--sm" @click="addSubscriptionChannel">+ Добавить канал</button>
+        </div>
+
+        <p v-if="!state.settings.subscription_gate.channels.length" class="muted small">
+          Добавьте хотя бы один канал (@username или -100…), иначе проверка не включится.
+        </p>
+
+        <div
+          v-for="(channel, index) in state.settings.subscription_gate.channels"
+          :key="index"
+          class="channel-card panel panel--nested"
+        >
+          <div class="section-head">
+            <strong>Канал {{ index + 1 }}</strong>
+            <button type="button" class="btn btn--ghost btn--sm" @click="removeSubscriptionChannel(index)">Удалить</button>
+          </div>
+
+          <label class="field">
+            <span class="field-label">ID канала</span>
+            <input v-model="channel.channel_id" placeholder="@your_channel или -1001234567890" />
+            <span class="muted small">Username или числовой ID. Бот — админ в этом канале.</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Подпись на кнопке</span>
+            <input v-model="channel.title" placeholder="Например: Новости проекта" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Ссылка (необязательно)</span>
+            <input v-model="channel.subscribe_url" placeholder="https://t.me/your_channel" />
+            <span class="muted small">Если пусто — соберём из @username канала.</span>
+          </label>
+        </div>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Текст экрана подписки</span>
+        <textarea v-model="state.settings.subscription_gate.message" rows="3" placeholder="Подпишитесь, чтобы открыть бот"></textarea>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Подсказка, если подписка не найдена</span>
+        <input v-model="state.settings.subscription_gate.not_subscribed_hint" placeholder="Всплывающее сообщение при проверке" />
+        <span class="muted small">К списку неподписанных каналов добавится автоматически.</span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Текст кнопки «Проверить»</span>
+        <input v-model="state.settings.subscription_gate.check_button_text" placeholder="Я подписался — проверить" />
+      </label>
+
+      <label class="field field--inline-check">
+        <span class="field-label">Не требовать подписку у тех, кто уже оплатил</span>
+        <select v-model="state.settings.subscription_gate.skip_for_paid_users">
+          <option :value="true">Да — оплатившие проходят без проверки</option>
+          <option :value="false">Нет — проверять всех</option>
+        </select>
+      </label>
+    </article>
+
     <article class="panel form-stack">
       <h2>Тексты бота</h2>
       <p class="muted small">Сообщения, которые люди видят до входа в основную цепочку или при ошибке.</p>
@@ -27,19 +130,12 @@ const { state, saveSetting, uploadAdminFile, isImagePreview, isVideoPreview, med
     </article>
 
     <article class="panel form-stack">
-      <h2>Оплата</h2>
-      <p class="muted small">Эти поля уходят в платёжную систему — сумму и валюту меняйте осознанно.</p>
-      <label class="field">
-        <span class="field-label">Короткое название offера</span>
-        <input v-model="state.settings.offer.price_label" placeholder="Например: Полный доступ" />
-      </label>
-      <label class="field">
-        <span class="field-label">Текст перед оплатой</span>
-        <textarea v-model="state.settings.offer.price_text" placeholder="Что человек получит"></textarea>
-      </label>
+      <h2>Оффер и оплата</h2>
+      <p class="muted small">Цена, валюта и что показать после успешной оплаты.</p>
+
       <div class="two-cols">
         <label class="field">
-          <span class="field-label">Сумма</span>
+          <span class="field-label">Сумма (копейки/центы)</span>
           <input v-model.number="state.settings.offer.amount" type="number" min="0" />
         </label>
         <label class="field">
@@ -47,95 +143,135 @@ const { state, saveSetting, uploadAdminFile, isImagePreview, isVideoPreview, med
           <input v-model="state.settings.offer.currency" placeholder="RUB" />
         </label>
       </div>
-      <details class="panel soft-panel">
-        <summary>Технические поля Platega</summary>
-        <label class="field">
-          <span class="field-label">Способ оплаты (число из кабинета)</span>
-          <input v-model.number="state.settings.offer.payment_method" type="number" />
-        </label>
-        <label class="field">
-          <span class="field-label">Описание платежа</span>
-          <input v-model="state.settings.offer.description" placeholder="Видно в платёжке" />
-        </label>
-      </details>
-      <button type="button" class="btn btn--primary" @click="saveSetting('offer')">Сохранить оплату</button>
-    </article>
 
-    <article class="panel form-stack">
-      <div class="section-head">
-        <div>
-          <h2>После успешной оплаты</h2>
-          <p class="muted small">Бот отправит это сообщение, когда оплата подтверждена.</p>
-        </div>
-        <button type="button" class="btn btn--secondary" @click="saveSetting('offer')">Сохранить выдачу</button>
-      </div>
+      <label class="field">
+        <span class="field-label">Описание платежа</span>
+        <input v-model="state.settings.offer.description" placeholder="Текст в платёжной системе" />
+      </label>
+
+      <label class="field">
+        <span class="field-label">Текст перед ценой</span>
+        <textarea v-model="state.settings.offer.price_text" rows="2"></textarea>
+      </label>
+
+      <h3 class="subhead">Выдача после оплаты</h3>
+      <p class="muted small">
+        Если настроена цепочка «После оплаты», она идёт после короткого сообщения ниже (если включено). Иначе — только это сообщение.
+      </p>
+
+      <label class="field field--inline-check">
+        <span class="field-label">Сначала короткое сообщение, потом цепочка</span>
+        <select v-model="state.settings.offer.delivery.send_before_chain">
+          <option :value="false">Нет — сразу цепочка после оплаты</option>
+          <option :value="true">Да — короткое сообщение, затем цепочка</option>
+        </select>
+      </label>
 
       <label class="field">
         <span class="field-label">Заголовок</span>
-        <input v-model="state.settings.offer.delivery.title" placeholder="Спасибо за оплату" />
+        <input v-model="state.settings.offer.delivery.title" placeholder="Доступ открыт" />
       </label>
       <label class="field">
-        <span class="field-label">Основной текст</span>
-        <textarea v-model="state.settings.offer.delivery.text" placeholder="Что получил и что делать дальше"></textarea>
+        <span class="field-label">Текст</span>
+        <textarea v-model="state.settings.offer.delivery.text" rows="3"></textarea>
       </label>
 
       <div class="two-cols">
         <label class="field">
-          <span class="field-label">Тип файла / медиа</span>
+          <span class="field-label">Тип медиа</span>
           <select v-model="state.settings.offer.delivery.media_type">
-            <option value="">Без вложения</option>
+            <option value="">Без медиа</option>
             <option value="photo">Фото</option>
             <option value="video">Видео</option>
             <option value="animation">GIF</option>
-            <option value="document">Файл</option>
           </select>
         </label>
         <label class="field">
-          <span class="field-label">Файл или ссылка</span>
-          <input v-model="state.settings.offer.delivery.media_url" placeholder="Загрузить или вставить URL" />
-          <input type="file" class="file-input" @change="uploadAdminFile($event, state.settings.offer.delivery)" />
-          <div v-if="state.settings.offer.delivery.media_url" class="media-preview">
-            <img
-              v-if="isImagePreview(state.settings.offer.delivery)"
-              :src="mediaPreviewUrl(state.settings.offer.delivery.media_url)"
-              alt=""
-            />
-            <video
-              v-else-if="isVideoPreview(state.settings.offer.delivery)"
-              :src="mediaPreviewUrl(state.settings.offer.delivery.media_url)"
-              controls
-              playsinline
-            ></video>
-            <a v-else :href="mediaPreviewUrl(state.settings.offer.delivery.media_url)" target="_blank" rel="noreferrer">{{
-              mediaTypeLabel(state.settings.offer.delivery.media_type)
-            }}</a>
-            <span class="muted small">{{ mediaTypeLabel(state.settings.offer.delivery.media_type) }}</span>
-          </div>
+          <span class="field-label">Подпись к медиа</span>
+          <input v-model="state.settings.offer.delivery.media_caption" />
         </label>
       </div>
 
-      <label class="field">
-        <span class="field-label">Подпись к медиа</span>
-        <textarea v-model="state.settings.offer.delivery.media_caption" placeholder="Необязательно"></textarea>
+      <label v-if="state.settings.offer.delivery.media_type" class="field">
+        <span class="field-label">Медиа ({{ mediaTypeLabel(state.settings.offer.delivery) }})</span>
+        <input v-model="state.settings.offer.delivery.media_url" placeholder="upload://… или https://…" />
+        <input type="file" accept="image/*,video/*" @change="uploadAdminFile($event, state.settings.offer.delivery)" />
+        <img
+          v-if="isImagePreview(state.settings.offer.delivery)"
+          :src="mediaPreviewUrl(state.settings.offer.delivery.media_url)"
+          alt=""
+          class="media-preview"
+        />
+        <video
+          v-else-if="isVideoPreview(state.settings.offer.delivery)"
+          :src="mediaPreviewUrl(state.settings.offer.delivery.media_url)"
+          controls
+          class="media-preview"
+        />
       </label>
 
       <div class="delivery-buttons">
-        <div class="route-top">
-          <strong>Кнопки со ссылками</strong>
-          <button type="button" class="btn btn--ghost btn--sm" @click="addDeliveryButton">Добавить</button>
+        <div class="section-head">
+          <h3 class="subhead">Кнопки с ссылками</h3>
+          <button type="button" class="btn btn--ghost btn--sm" @click="addDeliveryButton">+ Кнопка</button>
         </div>
-        <div v-if="!state.settings.offer.delivery.buttons.length" class="empty-line">Кнопок нет — можно добавить чат или материал.</div>
-        <div v-for="(button, index) in state.settings.offer.delivery.buttons" :key="index" class="delivery-button-row">
-          <input v-model="button.text" placeholder="Текст кнопки" />
-          <input v-model="button.url" placeholder="https://..." />
-          <button type="button" class="btn btn--ghost btn--sm" @click="removeDeliveryButton(index)">Удалить</button>
+        <div v-for="(btn, idx) in state.settings.offer.delivery.buttons" :key="idx" class="two-cols delivery-btn-row">
+          <label class="field">
+            <span class="field-label">Текст</span>
+            <input v-model="btn.text" />
+          </label>
+          <label class="field">
+            <span class="field-label">URL</span>
+            <div class="inline-field">
+              <input v-model="btn.url" placeholder="https://…" />
+              <button type="button" class="btn btn--ghost btn--sm" @click="removeDeliveryButton(idx)">×</button>
+            </div>
+          </label>
         </div>
       </div>
 
-      <details class="panel soft-panel">
-        <summary>Webhook для Platega</summary>
-        <p class="muted small">URL в кабинете: <code>/api/webhooks/platega</code> на вашем домене или IP.</p>
-      </details>
+      <button type="button" class="btn btn--primary" @click="saveSetting('offer')">Сохранить оффер</button>
     </article>
   </section>
 </template>
+
+<style scoped>
+.channels-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.channels-block__title {
+  margin: 0;
+  font-size: 1rem;
+}
+.channel-card {
+  padding: 14px;
+}
+.panel--nested {
+  background: var(--surface-2, #f6f7fa);
+  border: 1px solid var(--line, #e0e4ec);
+  border-radius: var(--radius-sm, 8px);
+}
+.delivery-btn-row {
+  align-items: end;
+}
+.inline-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.inline-field input {
+  flex: 1;
+}
+.media-preview {
+  max-width: 100%;
+  max-height: 200px;
+  margin-top: 8px;
+  border-radius: var(--radius-sm, 8px);
+}
+.subhead {
+  margin: 16px 0 8px;
+  font-size: 1rem;
+}
+</style>
