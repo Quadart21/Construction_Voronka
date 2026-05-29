@@ -14,14 +14,18 @@ def read_app_version() -> str:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     app_name: str = "Instagram Telegram Funnel"
     app_version: str = read_app_version()
     debug: bool = False
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    database_url: str = "sqlite:///./data/funnel.db"
+    database_url: str = f"sqlite:///{(_ROOT / 'data' / 'funnel.db').as_posix()}"
     bot_token: str = Field(default="", alias="BOT_TOKEN")
     admin_ids: str = "6132866588"
     admin_panel_username: str = "admin"
@@ -40,8 +44,8 @@ class Settings(BaseSettings):
     nurture_enabled: bool = True
     content_protection_enabled: bool = True
     timezone: str = "Europe/Amsterdam"
-    data_dir: Path = Path("data")
-    upload_dir: Path = Path("data/uploads")
+    data_dir: Path = _ROOT / "data"
+    upload_dir: Path = _ROOT / "data" / "uploads"
     admin_jwt_secret: str = Field(default="", alias="ADMIN_JWT_SECRET")
     admin_access_token_days: int = Field(default=30, alias="ADMIN_ACCESS_TOKEN_DAYS")
 
