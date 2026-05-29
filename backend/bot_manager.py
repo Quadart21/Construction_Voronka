@@ -52,18 +52,25 @@ async def stop_bot(bot_id: int) -> None:
 async def start_bot_record(bot: TelegramBot) -> None:
     token = (bot.token or "").strip()
     if not bot.is_active or not token or token == "REPLACE_ME":
+        logger.warning("Skip bot id=%s name=%r: inactive or missing token", bot.id, bot.name)
         await stop_bot(bot.id)
         return
     await stop_bot(bot.id)
-    application = build_bot_application(token, bot.id)
-    task = asyncio.create_task(_poll_bot(application, bot.id), name=f"bot-poll-{bot.id}")
-    _polling_tasks[int(bot.id)] = task
+    try:
+        application = build_bot_application(token, bot.id)
+        task = asyncio.create_task(_poll_bot(application, bot.id), name=f"bot-poll-{bot.id}")
+        _polling_tasks[int(bot.id)] = task
+        logger.info("Started Telegram bot id=%s name=%r", bot.id, bot.name)
+    except Exception:
+        logger.exception("Failed to start bot id=%s name=%r", bot.id, bot.name)
+        raise
 
 
 async def start_all_bots() -> None:
     with session_scope() as session:
         bots = list(session.scalars(select(TelegramBot).where(TelegramBot.is_active.is_(True)).order_by(TelegramBot.sort_order, TelegramBot.id)))
     if not bots:
+        logger.warning("No active bots in database — polling will not run")
         return
     for bot in bots:
         try:

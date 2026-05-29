@@ -149,18 +149,23 @@ def inject_admin_ctx(
 
 @app.on_event("startup")
 def startup() -> None:
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    Base.metadata.create_all(bind=engine)
-    ensure_runtime_columns()
-    ensure_multi_bot_schema()
-    seed_defaults()
+    from backend.bootstrap import bootstrap_application
+
+    bootstrap_application()
     with session_scope() as session:
         bootstrap_env_admin_if_empty(session)
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": settings.app_version, "time": datetime.utcnow().isoformat()}
+    from backend.bootstrap import active_bot_count
+
+    return {
+        "ok": True,
+        "version": settings.app_version,
+        "active_bots": active_bot_count(),
+        "time": datetime.utcnow().isoformat(),
+    }
 
 
 def _bot_to_out(bot: TelegramBot) -> TelegramBotOut:
