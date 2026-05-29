@@ -50,33 +50,38 @@ def _read_bot_token_from_env_file() -> str:
 
 
 def sync_bot_tokens_from_env() -> None:
-    """Push BOT_TOKEN from .env into telegram_bots so polling can start."""
-    env_token = _read_bot_token_from_env_file()
-    if not env_token:
-        logger.warning("BOT_TOKEN not found in .env — add token in admin (Мои боты) or set BOT_TOKEN in .env")
-        return
-
+    """Optional: copy BOT_TOKEN from .env into first bot if DB token is empty (legacy)."""
     with session_scope() as session:
         bots = list(session.scalars(select(TelegramBot).order_by(TelegramBot.sort_order, TelegramBot.id)))
-        if not bots:
-            session.add(
-                TelegramBot(
-                    name="Основной бот",
-                    token=env_token,
-                    is_active=True,
-                    sort_order=0,
-                )
-            )
-            logger.info("Created default bot record from BOT_TOKEN")
+        has_valid = any(_token_is_valid(bot.token) and bot.is_active for bot in bots)
+        if has_valid:
             return
 
-        primary = bots[0]
-        if not _token_is_valid(primary.token) or not primary.is_active:
+    env_token = _read_bot_token_from_env_file()
+    if env_token:
+        with session_scope() as session:
+            bots = list(session.scalars(select(TelegramBot).order_by(TelegramBot.sort_order, TelegramBot.id)))
+            if not bots:
+                session.add(
+                    TelegramBot(
+                        name="Основной бот",
+                        token=env_token,
+                        is_active=True,
+                        sort_order=0,
+                    )
+                )
+                logger.info("Created default bot record from BOT_TOKEN in .env")
+                return
+            primary = bots[0]
             primary.token = env_token
             primary.is_active = True
-            if not (primary.name or "").strip():
-                primary.name = "Основной бот"
             logger.info("Updated bot id=%s from BOT_TOKEN in .env", primary.id)
+        return
+
+    if bots:
+        logger.warning(
+            "No bot tokens in database. Open admin → Мои боты → paste token from @BotFather → Save."
+        )
 
 
 def bootstrap_application() -> None:

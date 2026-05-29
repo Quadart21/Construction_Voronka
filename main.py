@@ -18,7 +18,7 @@ async def run_bots() -> None:
     n = active_bot_count()
     if n == 0:
         logger.error(
-            "No Telegram bots started. Add a bot in admin (Мои боты) or set BOT_TOKEN in .env and restart."
+            "No Telegram bots polling. Add token in admin panel: Мои боты → token from @BotFather → Save."
         )
     else:
         logger.info("Telegram polling active for %s bot(s)", n)
