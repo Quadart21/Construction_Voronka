@@ -115,6 +115,9 @@ DEFAULT_SETTINGS = {
             "crypto_currency": "USDT",
             "network": "TRC20",
             "webhook_secret": "",
+            "invoice_reuse_active": True,
+            "invoice_max_per_hour": 3,
+            "invoice_cooldown_minutes": 5,
         },
     },
     "subscription_gate": {

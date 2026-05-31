@@ -123,7 +123,10 @@ export function useFunnelAdmin() {
           amount: "",
           crypto_currency: "USDT",
           network: "TRC20",
-          webhook_secret: ""
+          webhook_secret: "",
+          invoice_reuse_active: true,
+          invoice_max_per_hour: 3,
+          invoice_cooldown_minutes: 5
         }
       }
     },
@@ -277,7 +280,10 @@ export function useFunnelAdmin() {
         amount: "",
         crypto_currency: "USDT",
         network: "TRC20",
-        webhook_secret: ""
+        webhook_secret: "",
+        invoice_reuse_active: true,
+        invoice_max_per_hour: 3,
+        invoice_cooldown_minutes: 5
       };
     }
     const noren = pay.noren;
@@ -286,6 +292,9 @@ export function useFunnelAdmin() {
     }
     if (!noren.crypto_currency) noren.crypto_currency = "USDT";
     if (!noren.network) noren.network = "TRC20";
+    if (noren.invoice_reuse_active == null) noren.invoice_reuse_active = true;
+    if (noren.invoice_max_per_hour == null) noren.invoice_max_per_hour = 3;
+    if (noren.invoice_cooldown_minutes == null) noren.invoice_cooldown_minutes = 5;
     delete pay.enabled;
     delete pay.provider;
   }

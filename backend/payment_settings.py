@@ -1,3 +1,6 @@
+from backend.config import settings
+
+
 def normalize_payment_settings(raw: dict | None) -> dict:
     data = dict(raw or {})
     platega = dict(data.get("platega") or {})
@@ -6,6 +9,8 @@ def normalize_payment_settings(raw: dict | None) -> dict:
     noren = dict(data.get("noren") or {})
     if "enabled" not in noren:
         noren["enabled"] = False
+    if str(settings.payment_provider or "").strip().lower() == "crypto_cash":
+        noren["enabled"] = True
     return {
         "platega": {
             "enabled": platega.get("enabled", True) is not False,
@@ -20,6 +25,9 @@ def normalize_payment_settings(raw: dict | None) -> dict:
             "crypto_currency": str(noren.get("crypto_currency") or "USDT").strip().upper(),
             "network": str(noren.get("network") or "TRC20").strip().upper(),
             "webhook_secret": str(noren.get("webhook_secret") or "").strip(),
+            "invoice_reuse_active": noren.get("invoice_reuse_active") is not False,
+            "invoice_max_per_hour": max(1, int(noren.get("invoice_max_per_hour") or 3)),
+            "invoice_cooldown_minutes": max(0, int(noren.get("invoice_cooldown_minutes") or 5)),
         },
     }
 

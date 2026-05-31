@@ -21,7 +21,7 @@ from backend.admin_auth import (
 )
 from backend.config import settings
 from backend.database import Base, engine, session_scope
-from backend.noren import get_noren_rates, map_noren_status, verify_noren_webhook_signature
+from backend.noren import NOREN_STATUS_EVENTS, get_noren_rates, verify_noren_webhook_signature
 from backend.payment_delivery import finalize_paid_payment, payment_payload_meta
 from backend.payment_settings import normalize_payment_settings
 from backend.leads_notify import notify_admins_about_lead
@@ -456,8 +456,10 @@ async def platega_webhook(
 
 
 @app.post("/api/webhooks/noren")
+@app.post("/api/webhooks/crypto_cash")
 async def noren_webhook(
     request: Request,
+    x_merset_signature: str | None = Header(default=None, alias="X-Merset-Signature"),
     x_signature: str | None = Header(default=None, alias="X-Signature"),
     x_noren_signature: str | None = Header(default=None, alias="X-Noren-Signature"),
 ):
@@ -471,27 +473,28 @@ async def noren_webhook(
     if not isinstance(invoice, dict):
         invoice = payload
 
-    lookup_id = str(
-        invoice.get("id")
-        or invoice.get("invoice_id")
-        or payload.get("invoice_id")
-        or invoice.get("merchant_order_id")
-        or payload.get("merchant_order_id")
-        or ""
+    event = str(payload.get("event") or payload.get("type") or "").lower()
+    if event not in NOREN_STATUS_EVENTS:
+        return {"ok": True, "matched": False, "ignored": True, "event": event or None}
+
+    merchant_order_id = str(
+        invoice.get("merchant_order_id") or payload.get("merchant_order_id") or ""
     ).strip()
-    if not lookup_id:
+    if not merchant_order_id:
         return {"ok": True, "matched": False}
 
+    event_id = str(payload.get("event_id") or "").strip()
     matched_tx = ""
     record_currency = "USDT"
     with session_scope() as session:
-        record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == lookup_id))
-        if record is None and invoice.get("merchant_order_id"):
-            record = session.scalar(
-                select(PaymentRecord).where(PaymentRecord.transaction_id == str(invoice.get("merchant_order_id")))
-            )
+        record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == merchant_order_id))
         if record is None:
             return {"ok": True, "matched": False}
+
+        if event_id:
+            processed = list((record.payload or {}).get("processed_webhook_events") or [])
+            if event_id in processed:
+                return {"ok": True, "matched": True, "duplicate": True, "event_id": event_id}
 
         matched_tx = str(record.transaction_id)
         record_currency = str(record.currency or "USDT")
@@ -501,23 +504,25 @@ async def noren_webhook(
             record_bot_id = int(payment_meta["bot_id"])
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", record_bot_id))
         webhook_secret = payment_cfg["noren"]["webhook_secret"]
-        signature = x_signature or x_noren_signature
+        signature = x_merset_signature or x_signature or x_noren_signature
         if not verify_noren_webhook_signature(secret=webhook_secret, raw_body=raw_body, signature=signature):
             raise HTTPException(status_code=401, detail="Invalid signature")
 
-    event = str(payload.get("event") or payload.get("type") or "").lower()
-    raw_status = str(invoice.get("status") or payload.get("status") or "")
-    status = map_noren_status(raw_status)
-    if event in {"invoice.confirmed", "invoice.paid", "payment.confirmed"}:
-        status = "paid"
-
-    currency = str(invoice.get("crypto_currency") or record_currency)
-    return await finalize_paid_payment(
+    result = await finalize_paid_payment(
         transaction_id=matched_tx,
-        status=status,
-        payload_extra={"noren_webhook": payload},
-        currency=currency,
+        status="paid",
+        payload_extra={"noren_webhook": payload, "webhook_event": event},
+        currency=record_currency,
     )
+    if event_id and result.get("matched"):
+        with session_scope() as session:
+            record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == matched_tx))
+            if record is not None:
+                processed = list((record.payload or {}).get("processed_webhook_events") or [])
+                if event_id not in processed:
+                    processed.append(event_id)
+                record.payload = {**(record.payload or {}), "processed_webhook_events": processed}
+    return result
 
 
 @app.get("/api/noren/rates", dependencies=[Depends(inject_admin_ctx)])

@@ -243,7 +243,8 @@ const {
           <h2>Способы оплаты</h2>
           <p class="muted small">
             Включите Platega (карта / СБП) и/или Noren (крипта). Если оба включены — пользователь выбирает способ в боте.
-            Webhook Noren: <code>/api/webhooks/noren</code>
+            Webhook Noren: <code>/api/webhooks/noren</code> или <code>/api/webhooks/crypto_cash</code>.
+            Подпись: заголовок <code>X-Merset-Signature</code>.
           </p>
         </div>
         <button type="button" class="btn btn--primary" @click="saveSetting('payment')">Сохранить</button>
@@ -324,6 +325,30 @@ const {
               :value="`${state.settings.payment.noren.amount || '—'} ${state.settings.payment.noren.crypto_currency} (${state.settings.payment.noren.network})`"
               readonly
             />
+          </label>
+        </div>
+
+        <h3 class="subhead">Защита от массовых заявок</h3>
+        <p class="muted small">
+          Ограничивает создание новых крипто-счетов одним пользователем. Если счёт ещё активен — показывается снова без нового запроса в Noren.
+        </p>
+
+        <label class="field field--inline-check">
+          <span class="field-label">Показывать активный счёт повторно</span>
+          <select v-model="state.settings.payment.noren.invoice_reuse_active">
+            <option :value="true">Да — не создавать новый, пока не истёк</option>
+            <option :value="false">Нет — каждый раз новая заявка (с лимитами ниже)</option>
+          </select>
+        </label>
+
+        <div class="two-cols">
+          <label class="field">
+            <span class="field-label">Макс. новых счетов в час на пользователя</span>
+            <input v-model.number="state.settings.payment.noren.invoice_max_per_hour" type="number" min="1" max="20" />
+          </label>
+          <label class="field">
+            <span class="field-label">Пауза между новыми счетами (мин.)</span>
+            <input v-model.number="state.settings.payment.noren.invoice_cooldown_minutes" type="number" min="0" max="1440" />
           </label>
         </div>
       </template>

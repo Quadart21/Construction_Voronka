@@ -13,7 +13,16 @@ from backend.config import settings
 from backend.database import session_scope
 from backend.formatting import html_media_caption, html_message
 from backend.media import send_media
-from backend.noren import NorenError, create_noren_invoice, map_noren_status, new_merchant_order_id
+from backend.invoice_control import check_crypto_invoice_creation, details_from_payment_record
+from backend.noren import (
+    NorenError,
+    create_noren_invoice,
+    crypto_provider_name,
+    extract_invoice_details,
+    format_noren_payment_text,
+    map_noren_status,
+    new_merchant_order_id,
+)
 from backend.payment_settings import enabled_payment_methods, normalize_payment_settings
 from backend.payments import create_platega_payment_link
 from sqlalchemy import select
@@ -532,6 +541,25 @@ async def send_platega_payment(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
 
 
+def build_noren_payment_message(details: dict[str, str], *, reused: bool = False) -> tuple[str, InlineKeyboardMarkup | None]:
+    title, _ = format_noren_payment_text(details)
+    body = (
+        f"<b>{details['amount_crypto']} {details['crypto_currency']}</b> · {details['network']}\n"
+        f"Адрес: <code>{details['payment_address']}</code>"
+    )
+    if details.get("expires_label"):
+        body += f"\nСрок: {details['expires_label']}"
+    if reused:
+        body += "\n\n<i>Активный счёт — новая заявка не создана.</i>"
+    text = html_message(title, body)
+    qr_url = str(details.get("qr_url") or "")
+    rows = []
+    if qr_url.startswith(("http://", "https://")):
+        rows.append([InlineKeyboardButton("Открыть QR / оплату", url=qr_url)])
+    keyboard = InlineKeyboardMarkup(rows) if rows else None
+    return text, keyboard
+
+
 async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_id: int) -> bool:
     bot_id = bot_id_from(context.application)
     with session_scope() as session:
@@ -541,8 +569,41 @@ async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return False
         resolved_step_code = step.code
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
-        offer = get_setting(session, "offer", bot_id)
         noren = payment_cfg["noren"]
+        decision = check_crypto_invoice_creation(session, user=user, bot_id=bot_id, limits=noren)
+        if decision.action == "blocked":
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата криптой", decision.message),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            log_event(session, user, "invoice_blocked", resolved_step_code, {"reason": decision.message})
+            return False
+        if decision.action == "reuse" and decision.record is not None:
+            try:
+                details = details_from_payment_record(decision.record)
+            except ValueError:
+                details = None
+            if details is not None:
+                log_event(
+                    session,
+                    user,
+                    "invoice_reused",
+                    resolved_step_code,
+                    {"transaction_id": details["merchant_order_id"]},
+                )
+                text, keyboard = build_noren_payment_message(details, reused=True)
+                await send_replacing_previous(
+                    application=context.application,
+                    chat_id=update.effective_chat.id,
+                    text=text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                    protect_content=settings.content_protection_enabled,
+                )
+                return True
         merchant_order_id = new_merchant_order_id()
         local_meta = {
             "bot_id": bot_id,
@@ -562,46 +623,50 @@ async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 protect_content=settings.content_protection_enabled,
             )
             return False
-        invoice_id = str(invoice.get("id") or "")
-        amount_crypto = str(invoice.get("amount_crypto") or noren["amount"])
-        crypto_currency = str(invoice.get("crypto_currency") or noren["crypto_currency"])
-        network = str(invoice.get("network") or noren["network"])
-        payment_address = str(invoice.get("payment_address") or "")
-        qr_url = str(invoice.get("qr_url") or "")
+        try:
+            details = extract_invoice_details(invoice)
+        except NorenError as exc:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата криптой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
+        provider = crypto_provider_name()
+        order_id = details["merchant_order_id"]
         create_payment_record(
             session,
             user=user,
-            transaction_id=invoice_id or merchant_order_id,
+            transaction_id=order_id,
             status=map_noren_status(str(invoice.get("status"))),
             amount=0,
-            currency=crypto_currency,
-            description=str(offer.get("description", "Оплата оффера")),
+            currency=details["crypto_currency"],
+            description=order_id,
             payload={
-                "provider": "noren",
+                "provider": provider,
                 "invoice": invoice,
-                "amount_crypto": amount_crypto,
+                "invoice_id": details["invoice_id"],
+                "merchant_order_id": order_id,
+                "amount_crypto": details["amount_crypto"],
+                "crypto_currency": details["crypto_currency"],
+                "network": details["network"],
+                "payment_address": details["payment_address"],
+                "qr_url": details["qr_url"],
+                "expires_at": details["expires_at"],
                 "local": local_meta,
             },
-            provider="noren",
+            provider=provider,
         )
         log_event(
             session,
             user,
             "payment_started",
             resolved_step_code,
-            {"transaction_id": invoice_id or merchant_order_id, "provider": "noren"},
+            {"transaction_id": order_id, "provider": provider, "merchant_order_id": order_id},
         )
-        body = (
-            f"{offer.get('price_text', '')}\n\n"
-            f"Сумма: <b>{amount_crypto} {crypto_currency}</b> ({network})\n"
-            f"Адрес для перевода:\n<code>{payment_address}</code>\n\n"
-            "После оплаты доступ откроется автоматически."
-        )
-        text = html_message(step.title, body)
-        rows = []
-        if qr_url.startswith(("http://", "https://")):
-            rows.append([InlineKeyboardButton("Открыть QR / оплату", url=qr_url)])
-        keyboard = InlineKeyboardMarkup(rows) if rows else None
+        text, keyboard = build_noren_payment_message(details)
     await send_replacing_previous(
         application=context.application,
         chat_id=update.effective_chat.id,

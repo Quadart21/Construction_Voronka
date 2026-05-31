@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     data_dir: Path = _ROOT / "data"
     upload_dir: Path = _ROOT / "data" / "uploads"
     admin_jwt_secret: str = Field(default="", alias="ADMIN_JWT_SECRET")
-    admin_access_token_days: int = Field(default=30, alias="ADMIN_ACCESS_TOKEN_DAYS")
+    payment_provider: str = Field(default="", alias="PAYMENT_PROVIDER")
 
     @property
     def admin_id_list(self) -> list[int]:
