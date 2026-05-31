@@ -45,7 +45,10 @@ def details_from_payment_record(record: PaymentRecord) -> dict[str, str]:
     network = str(payload.get("network") or "").strip().upper()
     payment_address = str(payload.get("payment_address") or "").strip()
     qr_url = str(payload.get("qr_url") or "").strip()
-    if not all([merchant_order_id, amount_crypto, crypto_currency, network, payment_address]):
+    payment_page_url = str(payload.get("payment_page_url") or "").strip()
+    if not all([merchant_order_id, amount_crypto, crypto_currency, network]):
+        raise ValueError("Incomplete stored invoice")
+    if not payment_address and not payment_page_url and not qr_url:
         raise ValueError("Incomplete stored invoice")
     return {
         "invoice_id": str(payload.get("invoice_id") or "").strip(),
@@ -55,6 +58,9 @@ def details_from_payment_record(record: PaymentRecord) -> dict[str, str]:
         "network": network,
         "payment_address": payment_address,
         "qr_url": qr_url,
+        "payment_page_url": payment_page_url,
+        "amount_fiat": str(payload.get("amount_fiat") or "").strip(),
+        "fiat_currency": str(payload.get("fiat_currency") or "").strip().upper(),
         "expires_at": expires_at,
         "expires_label": format_expires_at_utc(expires_at),
     }

@@ -21,7 +21,7 @@ from backend.admin_auth import (
 )
 from backend.config import settings
 from backend.database import Base, engine, session_scope
-from backend.noren import NOREN_STATUS_EVENTS, get_noren_rates, verify_noren_webhook_signature
+from backend.noren import NOREN_STATUS_EVENTS, get_available_rates, verify_noren_webhook_signature
 from backend.payment_delivery import finalize_paid_payment, payment_payload_meta
 from backend.payment_settings import normalize_payment_settings
 from backend.leads_notify import notify_admins_about_lead
@@ -531,7 +531,7 @@ def noren_rates(bot_id: int = Depends(resolve_bot_id)):
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
         noren = payment_cfg["noren"]
     try:
-        items = get_noren_rates(noren=noren)
+        items = get_available_rates(noren=noren)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"items": items}

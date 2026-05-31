@@ -16,8 +16,7 @@ const {
   removeSubscriptionChannel,
   fetchNorenRates,
   norenRates,
-  norenRatesLoading,
-  norenPairKey
+  norenRatesLoading
 } = inject(FUNNEL_ADMIN);
 </script>
 
@@ -296,37 +295,50 @@ const {
         </label>
 
         <div class="section-head">
-          <h3 class="subhead">Валюта и сумма</h3>
-          <button type="button" class="btn btn--ghost btn--sm" :disabled="norenRatesLoading" @click="fetchNorenRates">
-            {{ norenRatesLoading ? "Загрузка…" : "Загрузить валюты" }}
-          </button>
+          <h3 class="subhead">Цена крипто-оплаты</h3>
         </div>
-
-        <label class="field">
-          <span class="field-label">Криптовалюта и сеть</span>
-          <select v-if="norenRates.length" v-model="norenPairKey">
-            <option v-for="rate in norenRates" :key="`${rate.currency}|${rate.network}`" :value="`${rate.currency}|${rate.network}`">
-              {{ rate.label }}
-            </option>
-          </select>
-          <span v-else class="muted small">
-            Нажмите «Загрузить валюты» после заполнения ключей — список подтянется из Noren API.
-          </span>
-        </label>
+        <p class="muted small">
+          Noren принимает только <strong>USD</strong>. Если указываете цену в рублях — укажите курс конвертации; в API уйдёт сумма в долларах.
+          Оплата картой (Platega) по-прежнему берёт цену из блока «Оффер и оплата».
+        </p>
 
         <div class="two-cols">
           <label class="field">
-            <span class="field-label">Сумма (в выбранной криптовалюте)</span>
-            <input v-model="state.settings.payment.noren.amount" placeholder="Например: 15" />
+            <span class="field-label">Сумма</span>
+            <input v-model="state.settings.payment.noren.price" placeholder="Например: 99 или 9900" />
           </label>
           <label class="field">
-            <span class="field-label">Текущий выбор</span>
-            <input
-              :value="`${state.settings.payment.noren.amount || '—'} ${state.settings.payment.noren.crypto_currency} (${state.settings.payment.noren.network})`"
-              readonly
-            />
+            <span class="field-label">Валюта суммы</span>
+            <select v-model="state.settings.payment.noren.price_currency">
+              <option value="USD">USD — отправится как есть</option>
+              <option value="RUB">RUB — конвертируется в USD</option>
+            </select>
           </label>
         </div>
+
+        <label v-if="state.settings.payment.noren.price_currency === 'RUB'" class="field">
+          <span class="field-label">Курс: RUB за 1 USD</span>
+          <input v-model="state.settings.payment.noren.usd_rub_rate" placeholder="Например: 92.5" />
+          <span class="muted small">Пример: цена 9900 RUB при курсе 99 → в Noren уйдёт 100 USD.</span>
+        </label>
+
+        <div class="section-head">
+          <h3 class="subhead">Доступные валюты (превью)</h3>
+          <button type="button" class="btn btn--ghost btn--sm" :disabled="norenRatesLoading" @click="fetchNorenRates">
+            {{ norenRatesLoading ? "Загрузка…" : "Загрузить из Noren" }}
+          </button>
+        </div>
+        <p class="muted small">
+          В боте пользователь выбирает криптовалюту из списка провайдера. Noren вернёт сумму в крипте и ссылку
+          <code>payment_page_url</code>.
+        </p>
+
+        <div v-if="norenRates.length" class="panel panel--nested">
+          <p v-for="rate in norenRates" :key="`${rate.currency}|${rate.network}`" class="muted small">
+            {{ rate.label }}
+          </p>
+        </div>
+        <p v-else class="muted small">Нажмите «Загрузить из Noren», чтобы проверить ключи и увидеть список, который увидит пользователь.</p>
 
         <h3 class="subhead">Защита от массовых заявок</h3>
         <p class="muted small">

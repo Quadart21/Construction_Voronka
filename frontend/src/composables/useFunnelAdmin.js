@@ -120,9 +120,9 @@ export function useFunnelAdmin() {
           api_secret: "",
           project_id: "",
           base_url: "https://noren.digital/api/v1/client",
-          amount: "",
-          crypto_currency: "USDT",
-          network: "TRC20",
+          price: "",
+          price_currency: "USD",
+          usd_rub_rate: "",
           webhook_secret: "",
           invoice_reuse_active: true,
           invoice_max_per_hour: 3,
@@ -277,9 +277,9 @@ export function useFunnelAdmin() {
         api_secret: "",
         project_id: "",
         base_url: "https://noren.digital/api/v1/client",
-        amount: "",
-        crypto_currency: "USDT",
-        network: "TRC20",
+        price: "",
+        price_currency: "USD",
+        usd_rub_rate: "",
         webhook_secret: "",
         invoice_reuse_active: true,
         invoice_max_per_hour: 3,
@@ -290,28 +290,18 @@ export function useFunnelAdmin() {
     if (noren.base_url == null || noren.base_url === "") {
       noren.base_url = "https://noren.digital/api/v1/client";
     }
-    if (!noren.crypto_currency) noren.crypto_currency = "USDT";
-    if (!noren.network) noren.network = "TRC20";
+    if (!noren.price && noren.amount) noren.price = noren.amount;
+    if (!noren.price_currency) noren.price_currency = "USD";
+    if (noren.usd_rub_rate == null) noren.usd_rub_rate = "";
     if (noren.invoice_reuse_active == null) noren.invoice_reuse_active = true;
     if (noren.invoice_max_per_hour == null) noren.invoice_max_per_hour = 3;
     if (noren.invoice_cooldown_minutes == null) noren.invoice_cooldown_minutes = 5;
     delete pay.enabled;
     delete pay.provider;
+    delete noren.amount;
+    delete noren.crypto_currency;
+    delete noren.network;
   }
-
-  const norenPairKey = computed({
-    get() {
-      ensureSettingsShape();
-      const noren = state.settings.payment.noren;
-      return `${noren.crypto_currency}|${noren.network}`;
-    },
-    set(value) {
-      ensureSettingsShape();
-      const [currency, network] = String(value || "").split("|");
-      if (currency) state.settings.payment.noren.crypto_currency = currency;
-      if (network) state.settings.payment.noren.network = network;
-    }
-  });
 
   async function fetchNorenRates() {
     ensureSettingsShape();
@@ -1271,7 +1261,6 @@ export function useFunnelAdmin() {
     fetchNorenRates,
     norenRates,
     norenRatesLoading,
-    norenPairKey,
     addSubscriptionChannel,
     removeSubscriptionChannel,
     addDeliveryButton,

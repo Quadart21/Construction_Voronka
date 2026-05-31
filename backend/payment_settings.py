@@ -21,9 +21,9 @@ def normalize_payment_settings(raw: dict | None) -> dict:
             "api_secret": str(noren.get("api_secret") or "").strip(),
             "project_id": str(noren.get("project_id") or "").strip(),
             "base_url": str(noren.get("base_url") or "https://noren.digital/api/v1/client").strip().rstrip("/"),
-            "amount": str(noren.get("amount") or "").strip(),
-            "crypto_currency": str(noren.get("crypto_currency") or "USDT").strip().upper(),
-            "network": str(noren.get("network") or "TRC20").strip().upper(),
+            "price": str(noren.get("price") or noren.get("amount") or "").strip(),
+            "price_currency": str(noren.get("price_currency") or "USD").strip().upper(),
+            "usd_rub_rate": str(noren.get("usd_rub_rate") or "").strip(),
             "webhook_secret": str(noren.get("webhook_secret") or "").strip(),
             "invoice_reuse_active": noren.get("invoice_reuse_active") is not False,
             "invoice_max_per_hour": max(1, int(noren.get("invoice_max_per_hour") or 3)),
@@ -38,6 +38,6 @@ def enabled_payment_methods(payment: dict) -> list[str]:
     if normalized["platega"]["enabled"]:
         methods.append("platega")
     noren = normalized["noren"]
-    if noren["enabled"] and noren["api_key"] and noren["api_secret"] and noren["project_id"] and noren["amount"]:
+    if noren["enabled"] and noren["api_key"] and noren["api_secret"] and noren["project_id"] and noren["price"]:
         methods.append("noren")
     return methods

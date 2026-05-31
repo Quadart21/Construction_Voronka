@@ -45,7 +45,11 @@ def flatten_rates(items: list[dict] | None) -> list[dict]:
             network_code = str(network.get("network") or "").strip().upper()
             if not network_code:
                 continue
-            available = bool(network.get("client_available", True)) and bool(network.get("acquiring", True))
+            client_ok = bool(network.get("client_available", True))
+            acquiring = bool(network.get("acquiring", True))
+            platform_ok = bool(network.get("platform_enabled", True))
+            provider_ok = bool(network.get("provider_availability", True))
+            available = client_ok and acquiring and platform_ok and provider_ok
             result.append(
                 {
                     "currency": currency,
@@ -60,6 +64,10 @@ def flatten_rates(items: list[dict] | None) -> list[dict]:
     return result
 
 
+def get_available_rates(*, noren: dict) -> list[dict]:
+    return [item for item in get_noren_rates(noren=noren) if item.get("available", True)]
+
+
 def get_noren_rates(*, noren: dict) -> list[dict]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
     if not cfg["api_key"] or not cfg["api_secret"]:
@@ -71,37 +79,86 @@ def get_noren_rates(*, noren: dict) -> list[dict]:
     return flatten_rates(items)
 
 
-def _parse_amount(value: str) -> str:
-    raw = str(value or "").strip().replace(",", ".")
+def _parse_amount(value: str | int | float) -> str:
+    if isinstance(value, (int, float)):
+        raw = str(value)
+    else:
+        raw = str(value or "").strip().replace(",", ".")
     if not raw:
-        raise NorenError("Укажите сумму оплаты Noren в выбранной криптовалюте")
+        raise NorenError("Укажите сумму оплаты")
     try:
         amount = Decimal(raw)
     except InvalidOperation as exc:
-        raise NorenError("Сумма Noren должна быть числом") from exc
+        raise NorenError("Сумма оплаты должна быть числом") from exc
     if amount <= 0:
-        raise NorenError("Сумма Noren должна быть больше нуля")
+        raise NorenError("Сумма оплаты должна быть больше нуля")
     normalized = format(amount.normalize(), "f")
     return normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
+
+
+NOREN_INVOICE_FIAT = "USD"
+
+
+def noren_checkout_fiat(noren: dict) -> tuple[str, str]:
+    cfg = normalize_payment_settings({"noren": noren})["noren"]
+    price_raw = str(cfg.get("price") or cfg.get("amount") or "").strip()
+    if not price_raw:
+        raise NorenError("Укажите цену крипто-оплаты в админке → Способы оплаты → Noren")
+    price_currency = str(cfg.get("price_currency") or "USD").strip().upper()
+    try:
+        price = Decimal(_parse_amount(price_raw))
+    except NorenError as exc:
+        raise NorenError("Цена крипто-оплаты должна быть положительным числом") from exc
+    if price_currency == "USD":
+        usd_amount = price
+    elif price_currency == "RUB":
+        rate_raw = str(cfg.get("usd_rub_rate") or "").strip()
+        if not rate_raw:
+            raise NorenError("Укажите курс «RUB за 1 USD» для конвертации цены из рублей")
+        try:
+            rate = Decimal(_parse_amount(rate_raw))
+        except NorenError as exc:
+            raise NorenError("Курс USD/RUB должен быть положительным числом") from exc
+        usd_amount = price / rate
+    else:
+        raise NorenError("Цена крипто-оплаты: только USD или RUB")
+    return _parse_amount(usd_amount), NOREN_INVOICE_FIAT
+
+
+def noren_price_label(noren: dict) -> str:
+    cfg = normalize_payment_settings({"noren": noren})["noren"]
+    amount_usd, _ = noren_checkout_fiat(noren)
+    price_raw = str(cfg.get("price") or cfg.get("amount") or "").strip()
+    price_currency = str(cfg.get("price_currency") or "USD").strip().upper()
+    if price_currency == "RUB":
+        return f"{price_raw} RUB (≈ {amount_usd} USD)"
+    return f"{amount_usd} USD"
 
 
 def create_noren_invoice(
     *,
     noren: dict,
     merchant_order_id: str,
+    crypto_currency: str,
+    network: str,
+    amount_fiat: str,
+    fiat_currency: str,
     metadata: dict | None = None,
 ) -> dict[str, Any]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
     if not cfg["api_key"] or not cfg["api_secret"] or not cfg["project_id"]:
         raise NorenError("Noren: заполните API key, secret и project_id")
-    amount = _parse_amount(cfg["amount"])
+    currency = str(crypto_currency or "").strip().upper()
+    network_code = str(network or "").strip().upper()
+    if not currency or not network_code:
+        raise NorenError("Выберите криптовалюту и сеть")
     body = {
         "project_id": cfg["project_id"],
         "merchant_order_id": merchant_order_id,
-        "amount_fiat": amount,
-        "fiat_currency": cfg["crypto_currency"],
-        "crypto_currency": cfg["crypto_currency"],
-        "network": cfg["network"],
+        "amount_fiat": _parse_amount(amount_fiat),
+        "fiat_currency": NOREN_INVOICE_FIAT,
+        "crypto_currency": currency,
+        "network": network_code,
         "metadata": metadata or {},
     }
     response = requests.post(f"{cfg['base_url']}/invoices", headers=_headers(cfg), json=body, timeout=25)
@@ -122,6 +179,9 @@ def extract_invoice_details(invoice: dict[str, Any]) -> dict[str, str]:
     network = str(invoice.get("network") or "").strip().upper()
     payment_address = str(invoice.get("payment_address") or "").strip()
     qr_url = str(invoice.get("qr_url") or "").strip()
+    payment_page_url = str(invoice.get("payment_page_url") or "").strip()
+    amount_fiat = str(invoice.get("amount_fiat") or "").strip()
+    fiat_currency = str(invoice.get("fiat_currency") or "").strip().upper()
     expires_at = str(invoice.get("expires_at") or "").strip()
     invoice_id = str(invoice.get("id") or "").strip()
     missing = [
@@ -131,12 +191,13 @@ def extract_invoice_details(invoice: dict[str, Any]) -> dict[str, str]:
             "amount_crypto": amount_crypto,
             "crypto_currency": crypto_currency,
             "network": network,
-            "payment_address": payment_address,
         }.items()
         if not value
     ]
     if missing:
         raise NorenError(f"Noren не вернул реквизиты: {', '.join(missing)}")
+    if not payment_address and not payment_page_url and not qr_url:
+        raise NorenError("Noren не вернул ссылку или адрес для оплаты")
     return {
         "invoice_id": invoice_id,
         "merchant_order_id": merchant_order_id,
@@ -145,9 +206,20 @@ def extract_invoice_details(invoice: dict[str, Any]) -> dict[str, str]:
         "network": network,
         "payment_address": payment_address,
         "qr_url": qr_url,
+        "payment_page_url": payment_page_url,
+        "amount_fiat": amount_fiat,
+        "fiat_currency": fiat_currency,
         "expires_at": expires_at,
         "expires_label": format_expires_at_utc(expires_at),
     }
+
+
+def invoice_payment_url(details: dict[str, str]) -> str:
+    for key in ("payment_page_url", "qr_url"):
+        value = str(details.get(key) or "").strip()
+        if value.startswith(("http://", "https://")):
+            return value
+    return ""
 
 
 def format_expires_at_utc(raw: str | None) -> str:
@@ -166,10 +238,11 @@ def format_expires_at_utc(raw: str | None) -> str:
 
 def format_noren_payment_text(details: dict[str, str]) -> tuple[str, str]:
     title = f"Оплата заказа {details['merchant_order_id']}"
-    lines = [
-        f"{details['amount_crypto']} {details['crypto_currency']} · {details['network']}",
-        f"Адрес: {details['payment_address']}",
-    ]
+    lines = [f"{details['amount_crypto']} {details['crypto_currency']} · {details['network']}"]
+    if details.get("amount_fiat") and details.get("fiat_currency"):
+        lines.append(f"≈ {details['amount_fiat']} {details['fiat_currency']}")
+    if details.get("payment_address"):
+        lines.append(f"Адрес: {details['payment_address']}")
     if details.get("expires_label"):
         lines.append(f"Срок: {details['expires_label']}")
     return title, "\n".join(lines)

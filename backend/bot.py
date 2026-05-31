@@ -19,7 +19,11 @@ from backend.noren import (
     create_noren_invoice,
     crypto_provider_name,
     extract_invoice_details,
+    noren_checkout_fiat,
+    noren_price_label,
     format_noren_payment_text,
+    get_available_rates,
+    invoice_payment_url,
     map_noren_status,
     new_merchant_order_id,
 )
@@ -445,9 +449,7 @@ async def show_payment_method_choice(
         if "platega" in methods:
             rows.append([InlineKeyboardButton("💳 Карта / СБП", callback_data=f"paym:platega:{step_id}")])
         if "noren" in methods:
-            noren = payment_cfg["noren"]
-            label = f"🪙 Криптой ({noren['amount']} {noren['crypto_currency']})"
-            rows.append([InlineKeyboardButton(label, callback_data=f"paym:noren:{step_id}")])
+            rows.append([InlineKeyboardButton("🪙 Криптовалюта", callback_data=f"paym:noren:{step_id}")])
         text = html_message(
             step.title,
             f"{offer.get('price_text', '')}\n\nВыберите способ оплаты:",
@@ -473,8 +475,86 @@ async def start_payment_with_method(
     if method == "platega":
         return await send_platega_payment(update, context, step_id=step_id)
     if method == "noren":
-        return await send_noren_payment(update, context, step_id=step_id)
+        return await show_noren_crypto_choice(update, context, step_id=step_id)
     return False
+
+
+async def show_noren_crypto_choice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    step_id: int,
+) -> bool:
+    bot_id = bot_id_from(context.application)
+    with session_scope() as session:
+        step = get_step_by_id(session, step_id, bot_id)
+        if step is None:
+            return False
+        payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
+        offer = get_setting(session, "offer", bot_id)
+        noren = payment_cfg["noren"]
+        try:
+            rates = get_available_rates(noren=noren)
+        except NorenError as exc:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата криптой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
+        if not rates:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message(
+                    "Оплата криптой",
+                    "Noren не вернул доступных валют. Проверьте ключи API и project_id в админке.",
+                ),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
+        try:
+            price_label = noren_price_label(noren)
+        except NorenError as exc:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата криптой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
+        if len(rates) == 1:
+            rate = rates[0]
+            return await send_noren_payment(
+                update,
+                context,
+                step_id=step_id,
+                crypto_currency=rate["currency"],
+                network=rate["network"],
+            )
+        rows = [
+            [InlineKeyboardButton(f"🪙 {rate['label']}", callback_data=f"payc:{step_id}:{rate['currency']}:{rate['network']}")]
+            for rate in rates
+        ]
+        text = html_message(
+            step.title,
+            f"{offer.get('price_text', '')}\n\n"
+            f"Сумма: <b>{price_label}</b>\n\n"
+            "Выберите криптовалюту для оплаты:",
+        )
+    await send_replacing_previous(
+        application=context.application,
+        chat_id=update.effective_chat.id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode=ParseMode.HTML,
+        protect_content=settings.content_protection_enabled,
+    )
+    return True
 
 
 async def send_platega_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_id: int) -> bool:
@@ -543,24 +623,36 @@ async def send_platega_payment(update: Update, context: ContextTypes.DEFAULT_TYP
 
 def build_noren_payment_message(details: dict[str, str], *, reused: bool = False) -> tuple[str, InlineKeyboardMarkup | None]:
     title, _ = format_noren_payment_text(details)
-    body = (
-        f"<b>{details['amount_crypto']} {details['crypto_currency']}</b> · {details['network']}\n"
-        f"Адрес: <code>{details['payment_address']}</code>"
-    )
+    body = f"<b>{details['amount_crypto']} {details['crypto_currency']}</b> · {details['network']}"
+    if details.get("amount_fiat") and details.get("fiat_currency"):
+        body += f"\n≈ {details['amount_fiat']} {details['fiat_currency']}"
+    if details.get("payment_address"):
+        body += f"\nАдрес: <code>{details['payment_address']}</code>"
     if details.get("expires_label"):
         body += f"\nСрок: {details['expires_label']}"
     if reused:
         body += "\n\n<i>Активный счёт — новая заявка не создана.</i>"
     text = html_message(title, body)
-    qr_url = str(details.get("qr_url") or "")
     rows = []
-    if qr_url.startswith(("http://", "https://")):
-        rows.append([InlineKeyboardButton("Открыть QR / оплату", url=qr_url)])
+    payment_url = invoice_payment_url(details)
+    if payment_url:
+        rows.append([InlineKeyboardButton("Перейти к оплате", url=payment_url)])
+    qr_url = str(details.get("qr_url") or "").strip()
+    page_url = str(details.get("payment_page_url") or "").strip()
+    if qr_url.startswith(("http://", "https://")) and qr_url != page_url:
+        rows.append([InlineKeyboardButton("Открыть QR", url=qr_url)])
     keyboard = InlineKeyboardMarkup(rows) if rows else None
     return text, keyboard
 
 
-async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_id: int) -> bool:
+async def send_noren_payment(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    step_id: int,
+    crypto_currency: str,
+    network: str,
+) -> bool:
     bot_id = bot_id_from(context.application)
     with session_scope() as session:
         user = get_or_create_user(session, update.effective_user, bot_id)
@@ -570,6 +662,17 @@ async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE,
         resolved_step_code = step.code
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
         noren = payment_cfg["noren"]
+        try:
+            amount_fiat, fiat_currency = noren_checkout_fiat(noren)
+        except NorenError as exc:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата криптой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
         decision = check_crypto_invoice_creation(session, user=user, bot_id=bot_id, limits=noren)
         if decision.action == "blocked":
             await send_replacing_previous(
@@ -611,9 +714,19 @@ async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "segment": user.segment_key,
             "step": resolved_step_code,
             "merchant_order_id": merchant_order_id,
+            "crypto_currency": crypto_currency,
+            "network": network,
         }
         try:
-            invoice = create_noren_invoice(noren=noren, merchant_order_id=merchant_order_id, metadata=local_meta)
+            invoice = create_noren_invoice(
+                noren=noren,
+                merchant_order_id=merchant_order_id,
+                crypto_currency=crypto_currency,
+                network=network,
+                amount_fiat=amount_fiat,
+                fiat_currency=fiat_currency,
+                metadata=local_meta,
+            )
         except NorenError as exc:
             await send_replacing_previous(
                 application=context.application,
@@ -654,6 +767,9 @@ async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 "network": details["network"],
                 "payment_address": details["payment_address"],
                 "qr_url": details["qr_url"],
+                "payment_page_url": details["payment_page_url"],
+                "amount_fiat": details["amount_fiat"],
+                "fiat_currency": details["fiat_currency"],
                 "expires_at": details["expires_at"],
                 "local": local_meta,
             },
@@ -686,6 +802,27 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             return False
         resolved_step_id = step.id
     return await show_payment_method_choice(update, context, step_id=resolved_step_id)
+
+
+async def on_noren_crypto_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not await ensure_subscribed(update, context):
+        return
+    try:
+        _, step_id_raw, crypto_currency, network = query.data.split(":", 3)
+        step_id = int(step_id_raw)
+    except (TypeError, ValueError):
+        await send_unavailable_transition(update, context)
+        return
+    if not await send_noren_payment(
+        update,
+        context,
+        step_id=step_id,
+        crypto_currency=crypto_currency.upper(),
+        network=network.upper(),
+    ):
+        await send_unavailable_transition(update, context)
 
 
 async def on_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -888,6 +1025,7 @@ def build_bot_application(token: str, bot_id: int) -> Application:
     app.add_handler(CallbackQueryHandler(on_next_navigation, pattern=r"^next:"))
     app.add_handler(CallbackQueryHandler(on_step_navigation, pattern=r"^goto:"))
     app.add_handler(CallbackQueryHandler(on_payment_method, pattern=r"^paym:"))
+    app.add_handler(CallbackQueryHandler(on_noren_crypto_choice, pattern=r"^payc:"))
     app.add_handler(CallbackQueryHandler(on_payment_by_step_id, pattern=r"^pay_step:"))
     app.add_handler(CallbackQueryHandler(on_payment, pattern=r"^pay:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
