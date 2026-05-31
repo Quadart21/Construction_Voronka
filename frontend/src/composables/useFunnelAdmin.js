@@ -108,7 +108,25 @@ export function useFunnelAdmin() {
     automations: [],
     users: [],
     events: [],
-    settings: { funnel_copy: {}, offer: { delivery: { buttons: [] } }, diagram_layout: {} },
+    settings: {
+      funnel_copy: {},
+      offer: { delivery: { buttons: [] } },
+      diagram_layout: {},
+      payment: {
+        platega: { enabled: true },
+        noren: {
+          enabled: false,
+          api_key: "",
+          api_secret: "",
+          project_id: "",
+          base_url: "https://noren.digital/api/v1/client",
+          amount: "",
+          crypto_currency: "USDT",
+          network: "TRC20",
+          webhook_secret: ""
+        }
+      }
+    },
     leads: [],
     loading: false,
     error: "",
@@ -126,6 +144,8 @@ export function useFunnelAdmin() {
 
   const chainBranchSourceCode = ref("");
   const branchTypeRef = ref("internal");
+  const norenRates = ref([]);
+  const norenRatesLoading = ref(false);
 
   const stepDraft = reactive({
     id: null,
@@ -239,6 +259,71 @@ export function useFunnelAdmin() {
     delete gate.channel_id;
     delete gate.subscribe_url;
     delete gate.subscribe_button_text;
+
+    if (!state.settings.payment) state.settings.payment = {};
+    const pay = state.settings.payment;
+    if (pay.enabled != null && !pay.platega) {
+      pay.platega = { enabled: pay.enabled !== false };
+    }
+    if (!pay.platega) pay.platega = { enabled: true };
+    if (pay.platega.enabled == null) pay.platega.enabled = true;
+    if (!pay.noren) {
+      pay.noren = {
+        enabled: false,
+        api_key: "",
+        api_secret: "",
+        project_id: "",
+        base_url: "https://noren.digital/api/v1/client",
+        amount: "",
+        crypto_currency: "USDT",
+        network: "TRC20",
+        webhook_secret: ""
+      };
+    }
+    const noren = pay.noren;
+    if (noren.base_url == null || noren.base_url === "") {
+      noren.base_url = "https://noren.digital/api/v1/client";
+    }
+    if (!noren.crypto_currency) noren.crypto_currency = "USDT";
+    if (!noren.network) noren.network = "TRC20";
+    delete pay.enabled;
+    delete pay.provider;
+  }
+
+  const norenPairKey = computed({
+    get() {
+      ensureSettingsShape();
+      const noren = state.settings.payment.noren;
+      return `${noren.crypto_currency}|${noren.network}`;
+    },
+    set(value) {
+      ensureSettingsShape();
+      const [currency, network] = String(value || "").split("|");
+      if (currency) state.settings.payment.noren.crypto_currency = currency;
+      if (network) state.settings.payment.noren.network = network;
+    }
+  });
+
+  async function fetchNorenRates() {
+    ensureSettingsShape();
+    state.error = "";
+    state.success = "";
+    norenRatesLoading.value = true;
+    try {
+      await request("/settings/payment", {
+        method: "PUT",
+        body: JSON.stringify(state.settings.payment)
+      });
+      const data = await request("/noren/rates");
+      norenRates.value = (data.items || []).filter((item) => item.available !== false);
+      state.success = norenRates.value.length
+        ? `Загружено ${norenRates.value.length} вариантов оплаты Noren.`
+        : "Noren не вернул доступных валют — проверьте ключи и project_id.";
+    } catch (error) {
+      state.error = error.message;
+    } finally {
+      norenRatesLoading.value = false;
+    }
   }
 
   function addSubscriptionChannel() {
@@ -1174,6 +1259,10 @@ export function useFunnelAdmin() {
     deleteAllSteps,
     saveAutomation,
     saveSetting,
+    fetchNorenRates,
+    norenRates,
+    norenRatesLoading,
+    norenPairKey,
     addSubscriptionChannel,
     removeSubscriptionChannel,
     addDeliveryButton,

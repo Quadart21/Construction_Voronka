@@ -13,6 +13,8 @@ from backend.config import settings
 from backend.database import session_scope
 from backend.formatting import html_media_caption, html_message
 from backend.media import send_media
+from backend.noren import NorenError, create_noren_invoice, map_noren_status, new_merchant_order_id
+from backend.payment_settings import enabled_payment_methods, normalize_payment_settings
 from backend.payments import create_platega_payment_link
 from sqlalchemy import select
 
@@ -401,23 +403,98 @@ async def on_step_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await render_step(context.application, update.effective_chat.id, resolved_step_code, update.effective_user, event_type="step_opened")
 
 
-async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_code: str | None = None, step_id: int | None = None) -> bool:
+async def show_payment_method_choice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    step_id: int,
+) -> bool:
+    bot_id = bot_id_from(context.application)
+    with session_scope() as session:
+        step = get_step_by_id(session, step_id, bot_id)
+        if step is None:
+            return False
+        payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
+        offer = get_setting(session, "offer", bot_id)
+        methods = enabled_payment_methods(payment_cfg)
+        if not methods:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message(
+                    "Оплата недоступна",
+                    "Включите Platega или Noren в админке → Настройки → Способы оплаты.",
+                ),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
+        if len(methods) == 1:
+            return await start_payment_with_method(update, context, step_id=step_id, method=methods[0])
+
+        rows = []
+        if "platega" in methods:
+            rows.append([InlineKeyboardButton("💳 Карта / СБП", callback_data=f"paym:platega:{step_id}")])
+        if "noren" in methods:
+            noren = payment_cfg["noren"]
+            label = f"🪙 Криптой ({noren['amount']} {noren['crypto_currency']})"
+            rows.append([InlineKeyboardButton(label, callback_data=f"paym:noren:{step_id}")])
+        text = html_message(
+            step.title,
+            f"{offer.get('price_text', '')}\n\nВыберите способ оплаты:",
+        )
+    await send_replacing_previous(
+        application=context.application,
+        chat_id=update.effective_chat.id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode=ParseMode.HTML,
+        protect_content=settings.content_protection_enabled,
+    )
+    return True
+
+
+async def start_payment_with_method(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    step_id: int,
+    method: str,
+) -> bool:
+    if method == "platega":
+        return await send_platega_payment(update, context, step_id=step_id)
+    if method == "noren":
+        return await send_noren_payment(update, context, step_id=step_id)
+    return False
+
+
+async def send_platega_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_id: int) -> bool:
     bot_id = bot_id_from(context.application)
     with session_scope() as session:
         user = get_or_create_user(session, update.effective_user, bot_id)
-        step = get_step_by_id(session, step_id, bot_id) if step_id is not None else get_step_by_code(session, step_code or "", bot_id)
+        step = get_step_by_id(session, step_id, bot_id)
         if step is None:
             return False
         resolved_step_code = step.code
         payment_payload = f"bot_id={bot_id};telegram_id={user.telegram_id};segment={user.segment_key};step={resolved_step_code}"
         offer = get_setting(session, "offer", bot_id)
-        payment = create_platega_payment_link(
-            amount=int(offer.get("amount", 9900)),
-            currency=str(offer.get("currency", "RUB")),
-            description=str(offer.get("description", "Оплата оффера")),
-            payload=payment_payload,
-            payment_method=int(offer.get("payment_method", 2)),
-        )
+        try:
+            payment = create_platega_payment_link(
+                amount=int(offer.get("amount", 9900)),
+                currency=str(offer.get("currency", "RUB")),
+                description=str(offer.get("description", "Оплата оффера")),
+                payload=payment_payload,
+                payment_method=int(offer.get("payment_method", 2)),
+            )
+        except RuntimeError as exc:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата картой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
         create_payment_record(
             session,
             user=user,
@@ -428,6 +505,7 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             description=str(offer.get("description", "Оплата оффера")),
             payload={
                 **payment,
+                "provider": "platega",
                 "local": {
                     "bot_id": bot_id,
                     "telegram_id": user.telegram_id,
@@ -435,11 +513,12 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     "step": resolved_step_code,
                 },
             },
+            provider="platega",
         )
-        log_event(session, user, "payment_started", resolved_step_code, {"transaction_id": payment.get("transactionId")})
+        log_event(session, user, "payment_started", resolved_step_code, {"transaction_id": payment.get("transactionId"), "provider": "platega"})
         text = html_message(
-            step.title if step else "Оплата",
-            f"{offer.get('price_text', '')}\n\nСумма: {offer.get('amount', 9900)} {offer.get('currency', 'RUB')}",
+            step.title,
+            f"{offer.get('price_text', '')}\n\nСумма: {offer.get('amount', 9900) / 100:.2f} {offer.get('currency', 'RUB')}",
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Перейти к оплате", url=payment["redirect"])]])
     await send_replacing_previous(
@@ -451,6 +530,115 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         protect_content=settings.content_protection_enabled,
     )
     return True
+
+
+async def send_noren_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_id: int) -> bool:
+    bot_id = bot_id_from(context.application)
+    with session_scope() as session:
+        user = get_or_create_user(session, update.effective_user, bot_id)
+        step = get_step_by_id(session, step_id, bot_id)
+        if step is None:
+            return False
+        resolved_step_code = step.code
+        payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
+        offer = get_setting(session, "offer", bot_id)
+        noren = payment_cfg["noren"]
+        merchant_order_id = new_merchant_order_id()
+        local_meta = {
+            "bot_id": bot_id,
+            "telegram_id": user.telegram_id,
+            "segment": user.segment_key,
+            "step": resolved_step_code,
+            "merchant_order_id": merchant_order_id,
+        }
+        try:
+            invoice = create_noren_invoice(noren=noren, merchant_order_id=merchant_order_id, metadata=local_meta)
+        except NorenError as exc:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата криптой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
+        invoice_id = str(invoice.get("id") or "")
+        amount_crypto = str(invoice.get("amount_crypto") or noren["amount"])
+        crypto_currency = str(invoice.get("crypto_currency") or noren["crypto_currency"])
+        network = str(invoice.get("network") or noren["network"])
+        payment_address = str(invoice.get("payment_address") or "")
+        qr_url = str(invoice.get("qr_url") or "")
+        create_payment_record(
+            session,
+            user=user,
+            transaction_id=invoice_id or merchant_order_id,
+            status=map_noren_status(str(invoice.get("status"))),
+            amount=0,
+            currency=crypto_currency,
+            description=str(offer.get("description", "Оплата оффера")),
+            payload={
+                "provider": "noren",
+                "invoice": invoice,
+                "amount_crypto": amount_crypto,
+                "local": local_meta,
+            },
+            provider="noren",
+        )
+        log_event(
+            session,
+            user,
+            "payment_started",
+            resolved_step_code,
+            {"transaction_id": invoice_id or merchant_order_id, "provider": "noren"},
+        )
+        body = (
+            f"{offer.get('price_text', '')}\n\n"
+            f"Сумма: <b>{amount_crypto} {crypto_currency}</b> ({network})\n"
+            f"Адрес для перевода:\n<code>{payment_address}</code>\n\n"
+            "После оплаты доступ откроется автоматически."
+        )
+        text = html_message(step.title, body)
+        rows = []
+        if qr_url.startswith(("http://", "https://")):
+            rows.append([InlineKeyboardButton("Открыть QR / оплату", url=qr_url)])
+        keyboard = InlineKeyboardMarkup(rows) if rows else None
+    await send_replacing_previous(
+        application=context.application,
+        chat_id=update.effective_chat.id,
+        text=text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+        protect_content=settings.content_protection_enabled,
+    )
+    return True
+
+
+async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step_code: str | None = None, step_id: int | None = None) -> bool:
+    bot_id = bot_id_from(context.application)
+    with session_scope() as session:
+        step = get_step_by_id(session, step_id, bot_id) if step_id is not None else get_step_by_code(session, step_code or "", bot_id)
+        if step is None:
+            return False
+        resolved_step_id = step.id
+    return await show_payment_method_choice(update, context, step_id=resolved_step_id)
+
+
+async def on_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not await ensure_subscribed(update, context):
+        return
+    try:
+        _, method, step_id_raw = query.data.split(":", 2)
+        step_id = int(step_id_raw)
+    except (TypeError, ValueError):
+        await send_unavailable_transition(update, context)
+        return
+    if method not in {"platega", "noren"}:
+        await send_unavailable_transition(update, context)
+        return
+    if not await start_payment_with_method(update, context, step_id=step_id, method=method):
+        await send_unavailable_transition(update, context)
 
 
 async def on_payment_by_step_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -634,6 +822,7 @@ def build_bot_application(token: str, bot_id: int) -> Application:
     app.add_handler(CallbackQueryHandler(on_branch_navigation, pattern=r"^branch:"))
     app.add_handler(CallbackQueryHandler(on_next_navigation, pattern=r"^next:"))
     app.add_handler(CallbackQueryHandler(on_step_navigation, pattern=r"^goto:"))
+    app.add_handler(CallbackQueryHandler(on_payment_method, pattern=r"^paym:"))
     app.add_handler(CallbackQueryHandler(on_payment_by_step_id, pattern=r"^pay_step:"))
     app.add_handler(CallbackQueryHandler(on_payment, pattern=r"^pay:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

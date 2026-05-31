@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import shutil
 
 import jwt
@@ -20,8 +21,9 @@ from backend.admin_auth import (
 )
 from backend.config import settings
 from backend.database import Base, engine, session_scope
-from backend.post_payment import deliver_after_payment
-from backend.runtime import get_bot_application
+from backend.noren import get_noren_rates, map_noren_status, verify_noren_webhook_signature
+from backend.payment_delivery import finalize_paid_payment, payment_payload_meta
+from backend.payment_settings import normalize_payment_settings
 from backend.leads_notify import notify_admins_about_lead
 from backend.media import safe_upload_name
 from backend.bot_manager import reload_bot
@@ -117,21 +119,6 @@ def ensure_runtime_columns() -> None:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE funnel_steps ADD COLUMN funnel_phase VARCHAR(32) DEFAULT 'main'"))
             connection.execute(text("UPDATE funnel_steps SET funnel_phase = 'main' WHERE funnel_phase IS NULL OR funnel_phase = ''"))
-
-
-def payment_payload_meta(payload: dict | None) -> dict:
-    data = payload or {}
-    local = data.get("local")
-    if isinstance(local, dict):
-        return local
-    raw = str(data.get("payload") or "")
-    result = {}
-    for chunk in raw.split(";"):
-        if "=" not in chunk:
-            continue
-        key, value = chunk.split("=", 1)
-        result[key.strip()] = value.strip()
-    return result
 
 
 def inject_admin_ctx(
@@ -455,69 +442,94 @@ async def platega_webhook(
     transaction_id = str(payload.get("id") or payload.get("transactionId") or "").strip()
     external_status = str(payload.get("status") or "").upper()
     status = PLATEGA_STATUS_MAP.get(external_status, external_status.lower() or "unknown")
-    delivery_target: int | None = None
-    delivery_bot_id: int | None = None
+    if not transaction_id:
+        return {"ok": True, "matched": False}
 
+    webhook_amount = payload.get("amount")
+    return await finalize_paid_payment(
+        transaction_id=transaction_id,
+        status=status,
+        payload_extra={"webhook": payload},
+        amount=int(webhook_amount) if webhook_amount is not None else None,
+        currency=str(payload.get("currency") or "") or None,
+    )
+
+
+@app.post("/api/webhooks/noren")
+async def noren_webhook(
+    request: Request,
+    x_signature: str | None = Header(default=None, alias="X-Signature"),
+    x_noren_signature: str | None = Header(default=None, alias="X-Noren-Signature"),
+):
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    invoice = payload.get("invoice") if isinstance(payload.get("invoice"), dict) else payload.get("data")
+    if not isinstance(invoice, dict):
+        invoice = payload
+
+    lookup_id = str(
+        invoice.get("id")
+        or invoice.get("invoice_id")
+        or payload.get("invoice_id")
+        or invoice.get("merchant_order_id")
+        or payload.get("merchant_order_id")
+        or ""
+    ).strip()
+    if not lookup_id:
+        return {"ok": True, "matched": False}
+
+    matched_tx = ""
+    record_currency = "USDT"
     with session_scope() as session:
-        record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == transaction_id)) if transaction_id else None
+        record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == lookup_id))
+        if record is None and invoice.get("merchant_order_id"):
+            record = session.scalar(
+                select(PaymentRecord).where(PaymentRecord.transaction_id == str(invoice.get("merchant_order_id")))
+            )
         if record is None:
             return {"ok": True, "matched": False}
 
-        previous_status = record.status
-        record.status = status
-        record.amount = int(payload.get("amount") or record.amount or 0)
-        record.currency = str(payload.get("currency") or record.currency or "RUB")
-        record.payload = {**(record.payload or {}), "webhook": payload}
-
+        matched_tx = str(record.transaction_id)
+        record_currency = str(record.currency or "USDT")
         record_bot_id = int(record.bot_id or 1)
         payment_meta = payment_payload_meta(record.payload)
         if payment_meta.get("bot_id"):
             record_bot_id = int(payment_meta["bot_id"])
-        user = (
-            session.get(User, record.user_id)
-            if record.user_id
-            else session.scalar(select(User).where(User.bot_id == record_bot_id, User.telegram_id == record.telegram_id))
-        )
-        paid_step = str(payment_meta.get("step") or user.current_step if user else "payment").strip() or "payment"
-        if user and status == "paid":
-            user.is_customer = True
-            if previous_status != "paid":
-                log_event(session, user, "payment_paid", paid_step, {"transaction_id": transaction_id})
-            if not (record.payload or {}).get("delivery_sent_at"):
-                delivery_target = user.telegram_id
-                delivery_bot_id = record_bot_id
-        elif user and status in {"failed", "refunded"} and previous_status != status:
-            log_event(session, user, f"payment_{status}", paid_step, {"transaction_id": transaction_id})
-            delivery_bot_id = None
-        else:
-            delivery_bot_id = None
+        payment_cfg = normalize_payment_settings(get_setting(session, "payment", record_bot_id))
+        webhook_secret = payment_cfg["noren"]["webhook_secret"]
+        signature = x_signature or x_noren_signature
+        if not verify_noren_webhook_signature(secret=webhook_secret, raw_body=raw_body, signature=signature):
+            raise HTTPException(status_code=401, detail="Invalid signature")
 
-        offer = get_setting(session, "offer", record_bot_id) if delivery_target else {}
+    event = str(payload.get("event") or payload.get("type") or "").lower()
+    raw_status = str(invoice.get("status") or payload.get("status") or "")
+    status = map_noren_status(raw_status)
+    if event in {"invoice.confirmed", "invoice.paid", "payment.confirmed"}:
+        status = "paid"
 
-    if delivery_target and delivery_bot_id:
-        application = get_bot_application(delivery_bot_id)
-        bot_token = None
-        if application is None:
-            with session_scope() as session:
-                bot_row = session.get(TelegramBot, delivery_bot_id)
-                bot_token = bot_row.token if bot_row else settings.bot_token
-        if application is not None:
-            await deliver_after_payment(application=application, chat_id=delivery_target, telegram_id=delivery_target, offer=offer)
-        elif bot_token:
-            from backend.delivery import send_paid_delivery
+    currency = str(invoice.get("crypto_currency") or record_currency)
+    return await finalize_paid_payment(
+        transaction_id=matched_tx,
+        status=status,
+        payload_extra={"noren_webhook": payload},
+        currency=currency,
+    )
 
-            async with Bot(bot_token) as bot:
-                await send_paid_delivery(bot, chat_id=delivery_target, offer=offer)
-        with session_scope() as session:
-            record = session.scalar(select(PaymentRecord).where(PaymentRecord.transaction_id == transaction_id))
-            user = session.scalar(select(User).where(User.bot_id == delivery_bot_id, User.telegram_id == delivery_target))
-            if record is not None:
-                record.payload = {**(record.payload or {}), "delivery_sent_at": datetime.utcnow().isoformat()}
-            if user is not None:
-                paid_step = str(payment_payload_meta(record.payload if record else {}).get("step") or user.current_step or "payment")
-                log_event(session, user, "paid_delivery_sent", paid_step, {"transaction_id": transaction_id})
 
-    return {"ok": True, "matched": True, "status": status}
+@app.get("/api/noren/rates", dependencies=[Depends(inject_admin_ctx)])
+def noren_rates(bot_id: int = Depends(resolve_bot_id)):
+    with session_scope() as session:
+        payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
+        noren = payment_cfg["noren"]
+    try:
+        items = get_noren_rates(noren=noren)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": items}
 
 
 @app.get("/api/segments", response_model=list[SegmentOut], dependencies=[Depends(inject_admin_ctx)])
@@ -787,11 +799,16 @@ def list_events(bot_id: int = Depends(resolve_bot_id)):
 def get_settings(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
         settings_rows = list(session.scalars(select(AppSetting).where(AppSetting.bot_id == bot_id).order_by(AppSetting.key)))
-        return {row.key: row.value for row in settings_rows}
+        result = {row.key: row.value for row in settings_rows}
+        if "payment" in result:
+            result["payment"] = normalize_payment_settings(result["payment"])
+        return result
 
 
 @app.put("/api/settings/{key}", dependencies=[Depends(inject_admin_ctx)])
 def update_settings(key: str, value: dict, bot_id: int = Depends(resolve_bot_id)):
+    if key == "payment":
+        value = normalize_payment_settings(value)
     with session_scope() as session:
         entity = set_setting(session, key, value, bot_id)
         return {"key": entity.key, "value": entity.value}

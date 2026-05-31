@@ -121,6 +121,7 @@ def create_payment_record(
     currency: str,
     description: str,
     payload: dict,
+    provider: str = "platega",
 ) -> PaymentRecord:
     record = PaymentRecord(
         bot_id=user.bot_id,
@@ -134,6 +135,7 @@ def create_payment_record(
         currency=currency,
         description=description,
         payload=payload,
+        provider=provider,
     )
     session.add(record)
     session.flush()

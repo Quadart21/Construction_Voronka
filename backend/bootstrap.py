@@ -78,10 +78,9 @@ def sync_bot_tokens_from_env() -> None:
             logger.info("Updated bot id=%s from BOT_TOKEN in .env", primary.id)
         return
 
-    if bots:
-        logger.warning(
-            "No bot tokens in database. Open admin → Мои боты → paste token from @BotFather → Save."
-        )
+    logger.warning(
+        "No bot tokens in database. Open admin → Мои боты → paste token from @BotFather → Save."
+    )
 
 
 def bootstrap_application() -> None:

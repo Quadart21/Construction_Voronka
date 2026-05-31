@@ -13,7 +13,11 @@ const {
   addDeliveryButton,
   removeDeliveryButton,
   addSubscriptionChannel,
-  removeSubscriptionChannel
+  removeSubscriptionChannel,
+  fetchNorenRates,
+  norenRates,
+  norenRatesLoading,
+  norenPairKey
 } = inject(FUNNEL_ADMIN);
 </script>
 
@@ -231,6 +235,98 @@ const {
       </div>
 
       <button type="button" class="btn btn--primary" @click="saveSetting('offer')">Сохранить оффер</button>
+    </article>
+
+    <article class="panel form-stack">
+      <div class="section-head">
+        <div>
+          <h2>Способы оплаты</h2>
+          <p class="muted small">
+            Включите Platega (карта / СБП) и/или Noren (крипта). Если оба включены — пользователь выбирает способ в боте.
+            Webhook Noren: <code>/api/webhooks/noren</code>
+          </p>
+        </div>
+        <button type="button" class="btn btn--primary" @click="saveSetting('payment')">Сохранить</button>
+      </div>
+
+      <label class="field field--inline-check">
+        <span class="field-label">Platega — карта и СБП</span>
+        <select v-model="state.settings.payment.platega.enabled">
+          <option :value="false">Выключено</option>
+          <option :value="true">Включено</option>
+        </select>
+      </label>
+      <p class="muted small">Ключи Platega задаются в <code>.env</code> на сервере (PLATEGA_*).</p>
+
+      <label class="field field--inline-check">
+        <span class="field-label">Noren — криптовалюта</span>
+        <select v-model="state.settings.payment.noren.enabled">
+          <option :value="false">Выключено</option>
+          <option :value="true">Включено</option>
+        </select>
+      </label>
+
+      <template v-if="state.settings.payment.noren.enabled">
+        <div class="two-cols">
+          <label class="field">
+            <span class="field-label">API Key</span>
+            <input v-model="state.settings.payment.noren.api_key" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span class="field-label">API Secret</span>
+            <input v-model="state.settings.payment.noren.api_secret" type="password" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="two-cols">
+          <label class="field">
+            <span class="field-label">Project ID</span>
+            <input v-model="state.settings.payment.noren.project_id" />
+          </label>
+          <label class="field">
+            <span class="field-label">Webhook secret</span>
+            <input v-model="state.settings.payment.noren.webhook_secret" type="password" autocomplete="off" />
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Base URL API</span>
+          <input v-model="state.settings.payment.noren.base_url" placeholder="https://noren.digital/api/v1/client" />
+        </label>
+
+        <div class="section-head">
+          <h3 class="subhead">Валюта и сумма</h3>
+          <button type="button" class="btn btn--ghost btn--sm" :disabled="norenRatesLoading" @click="fetchNorenRates">
+            {{ norenRatesLoading ? "Загрузка…" : "Загрузить валюты" }}
+          </button>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Криптовалюта и сеть</span>
+          <select v-if="norenRates.length" v-model="norenPairKey">
+            <option v-for="rate in norenRates" :key="`${rate.currency}|${rate.network}`" :value="`${rate.currency}|${rate.network}`">
+              {{ rate.label }}
+            </option>
+          </select>
+          <span v-else class="muted small">
+            Нажмите «Загрузить валюты» после заполнения ключей — список подтянется из Noren API.
+          </span>
+        </label>
+
+        <div class="two-cols">
+          <label class="field">
+            <span class="field-label">Сумма (в выбранной криптовалюте)</span>
+            <input v-model="state.settings.payment.noren.amount" placeholder="Например: 15" />
+          </label>
+          <label class="field">
+            <span class="field-label">Текущий выбор</span>
+            <input
+              :value="`${state.settings.payment.noren.amount || '—'} ${state.settings.payment.noren.crypto_currency} (${state.settings.payment.noren.network})`"
+              readonly
+            />
+          </label>
+        </div>
+      </template>
     </article>
   </section>
 </template>

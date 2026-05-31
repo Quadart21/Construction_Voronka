@@ -103,7 +103,20 @@ DEFAULT_SETTINGS = {
             "buttons": [{"text": "Открыть материалы", "url": "https://example.com/materials"}],
         },
     },
-    "payment": {"provider": "platega", "enabled": True},
+    "payment": {
+        "platega": {"enabled": True},
+        "noren": {
+            "enabled": False,
+            "api_key": "",
+            "api_secret": "",
+            "project_id": "",
+            "base_url": "https://noren.digital/api/v1/client",
+            "amount": "",
+            "crypto_currency": "USDT",
+            "network": "TRC20",
+            "webhook_secret": "",
+        },
+    },
     "subscription_gate": {
         "enabled": False,
         "channels": [],
