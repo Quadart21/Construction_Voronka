@@ -150,6 +150,8 @@ export function useFunnelAdmin() {
   const branchTypeRef = ref("internal");
   const norenRates = ref([]);
   const norenRatesLoading = ref(false);
+  const cryptoExchangeRates = ref([]);
+  const cryptoRatesLoading = ref(false);
 
   const stepDraft = reactive({
     id: null,
@@ -310,18 +312,61 @@ export function useFunnelAdmin() {
     return `${rate.currency}|${rate.network}`;
   }
 
+  function norenAllowedSymbols() {
+    ensureSettingsShape();
+    const set = new Set();
+    for (const key of state.settings.payment.noren.allowed_cryptos) {
+      const currency = String(key).split("|")[0]?.trim().toUpperCase();
+      if (currency) set.add(currency);
+    }
+    return [...set];
+  }
+
+  async function loadCryptoExchangeRates() {
+    cryptoRatesLoading.value = true;
+    try {
+      const data = await request("/crypto-rates");
+      cryptoExchangeRates.value = data.items || [];
+    } catch (error) {
+      state.error = error.message;
+    } finally {
+      cryptoRatesLoading.value = false;
+    }
+  }
+
+  async function refreshCoinloreRatesForSelection() {
+    const symbols = norenAllowedSymbols();
+    if (!symbols.length) {
+      cryptoExchangeRates.value = [];
+      return;
+    }
+    cryptoRatesLoading.value = true;
+    try {
+      const data = await request("/crypto-rates/refresh", {
+        method: "POST",
+        body: JSON.stringify({ symbols })
+      });
+      cryptoExchangeRates.value = data.items || [];
+    } catch (error) {
+      state.error = error.message;
+    } finally {
+      cryptoRatesLoading.value = false;
+    }
+  }
+
   function isNorenCryptoAllowed(rate) {
     ensureSettingsShape();
     return state.settings.payment.noren.allowed_cryptos.includes(norenCryptoKey(rate));
   }
 
-  function toggleNorenCrypto(rate, checked) {
+  async function toggleNorenCrypto(rate, checked) {
     ensureSettingsShape();
     const key = norenCryptoKey(rate);
     const list = state.settings.payment.noren.allowed_cryptos;
     const index = list.indexOf(key);
     if (checked && index === -1) list.push(key);
     if (!checked && index !== -1) list.splice(index, 1);
+    await refreshCoinloreRatesForSelection();
   }
 
   async function fetchNorenRates() {
@@ -728,6 +773,7 @@ export function useFunnelAdmin() {
       });
       ensureSettingsShape();
       if (!stepDraft.id && !stepDraft.code) stepDraft.sort_order = nextSortOrder.value;
+      await loadCryptoExchangeRates();
     } catch (error) {
       state.error = error.message;
     } finally {
@@ -1284,6 +1330,10 @@ export function useFunnelAdmin() {
     toggleNorenCrypto,
     norenRates,
     norenRatesLoading,
+    cryptoExchangeRates,
+    cryptoRatesLoading,
+    loadCryptoExchangeRates,
+    refreshCoinloreRatesForSelection,
     addSubscriptionChannel,
     removeSubscriptionChannel,
     addDeliveryButton,

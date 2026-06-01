@@ -1,5 +1,6 @@
 from datetime import datetime
 import json
+import logging
 import shutil
 
 import jwt
@@ -22,6 +23,11 @@ from backend.admin_auth import (
 from backend.config import settings
 from backend.database import Base, engine, session_scope
 from backend.noren import NOREN_STATUS_EVENTS, get_available_rates, verify_noren_webhook_signature
+from backend.crypto_rates import (
+    list_stored_rates,
+    refresh_crypto_rates,
+    symbols_from_allowed_cryptos,
+)
 from backend.payment_delivery import finalize_paid_payment, payment_payload_meta
 from backend.payment_settings import normalize_payment_settings
 from backend.leads_notify import notify_admins_about_lead
@@ -79,6 +85,7 @@ from backend.services import get_accounting_summary, get_conversion_report, get_
 security_bearer = HTTPBearer(auto_error=False)
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title=settings.app_name)
+logger = logging.getLogger(__name__)
 app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 app.add_middleware(
     CORSMiddleware,
@@ -527,6 +534,30 @@ async def noren_webhook(
     return result
 
 
+@app.get("/api/crypto-rates", dependencies=[Depends(inject_admin_ctx)])
+def get_crypto_rates(bot_id: int = Depends(resolve_bot_id)):
+    with session_scope() as session:
+        payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
+    symbols = symbols_from_allowed_cryptos(payment_cfg["noren"].get("allowed_cryptos"))
+    return {"items": list_stored_rates(symbols=symbols or None)}
+
+
+@app.post("/api/crypto-rates/refresh", dependencies=[Depends(inject_admin_ctx)])
+def refresh_crypto_rates_api(payload: dict | None = None, bot_id: int = Depends(resolve_bot_id)):
+    symbols: list[str]
+    if payload and payload.get("symbols"):
+        symbols = [str(item).strip().upper() for item in payload["symbols"] if str(item).strip()]
+    else:
+        with session_scope() as session:
+            payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
+        symbols = sorted(symbols_from_allowed_cryptos(payment_cfg["noren"].get("allowed_cryptos")))
+    try:
+        updated = refresh_crypto_rates(symbols)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"updated": updated, "items": list_stored_rates(symbols=symbols or None)}
+
+
 @app.get("/api/noren/rates", dependencies=[Depends(inject_admin_ctx)])
 def noren_rates(bot_id: int = Depends(resolve_bot_id)):
     with session_scope() as session:
@@ -818,4 +849,12 @@ def update_settings(key: str, value: dict, bot_id: int = Depends(resolve_bot_id)
         value = normalize_payment_settings(value)
     with session_scope() as session:
         entity = set_setting(session, key, value, bot_id)
-        return {"key": entity.key, "value": entity.value}
+        saved_value = entity.value
+    if key == "payment":
+        symbols = symbols_from_allowed_cryptos(saved_value.get("noren", {}).get("allowed_cryptos"))
+        if symbols:
+            try:
+                refresh_crypto_rates(symbols)
+            except Exception:
+                logger.exception("CoinLore refresh after payment settings save failed")
+    return {"key": entity.key, "value": normalize_payment_settings(saved_value) if key == "payment" else saved_value}

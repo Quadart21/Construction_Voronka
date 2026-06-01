@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import time
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.database import session_scope
-from backend.models import AppSetting
+from backend.models import AppSetting, CryptoExchangeRate
 from backend.payment_settings import normalize_payment_settings
 
 logger = logging.getLogger(__name__)
@@ -24,15 +24,32 @@ TICKER_PAGE_SIZE = 100
 
 STABLECOINS = frozenset({"USDT", "USDC", "BUSD", "DAI", "TUSD", "USDD", "FDUSD", "USDP", "PYUSD"})
 
-_lock = threading.RLock()
-_prices_usd: dict[str, Decimal] = {}
-_updated_at: float = 0.0
 _asset_ids: dict[str, str] = {}
 _assets_loaded_at: float = 0.0
 
 
 class CryptoRatesError(RuntimeError):
     pass
+
+
+def symbols_from_allowed_cryptos(allowed_cryptos: Iterable[str] | None) -> set[str]:
+    symbols: set[str] = set()
+    for item in allowed_cryptos or []:
+        if isinstance(item, str) and "|" in item:
+            currency = item.split("|", 1)[0].strip().upper()
+            if currency:
+                symbols.add(currency)
+    return symbols
+
+
+def collect_tracked_symbols() -> set[str]:
+    symbols = set(STABLECOINS)
+    with session_scope() as session:
+        rows = session.scalars(select(AppSetting).where(AppSetting.key == "payment"))
+        for row in rows:
+            payment = normalize_payment_settings(row.value)
+            symbols.update(symbols_from_allowed_cryptos(payment["noren"].get("allowed_cryptos")))
+    return symbols
 
 
 def _sleep_between_requests() -> None:
@@ -57,20 +74,6 @@ def _format_crypto_amount(amount: Decimal, symbol: str) -> str:
         quantized = amount.quantize(Decimal("0.00000001"))
     normalized = format(quantized.normalize(), "f")
     return normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
-
-
-def collect_tracked_symbols() -> set[str]:
-    symbols = set(STABLECOINS)
-    with session_scope() as session:
-        rows = session.scalars(select(AppSetting).where(AppSetting.key == "payment"))
-        for row in rows:
-            payment = normalize_payment_settings(row.value)
-            for key in payment["noren"].get("allowed_cryptos") or []:
-                if isinstance(key, str) and "|" in key:
-                    currency = key.split("|", 1)[0].strip().upper()
-                    if currency:
-                        symbols.add(currency)
-    return symbols
 
 
 def _load_asset_ids() -> dict[str, str]:
@@ -114,10 +117,10 @@ def _fetch_ticker_by_id(coin_id: str) -> Decimal | None:
     return _parse_price(item.get("price_usd"))
 
 
-def refresh_crypto_rates(symbols: Iterable[str] | None = None) -> int:
-    wanted = {str(item or "").strip().upper() for item in (symbols or collect_tracked_symbols()) if str(item or "").strip()}
+def _fetch_coinlore_prices(symbols: Iterable[str]) -> dict[str, Decimal]:
+    wanted = {str(item or "").strip().upper() for item in symbols if str(item or "").strip()}
     if not wanted:
-        wanted = set(STABLECOINS)
+        return {}
 
     found: dict[str, Decimal] = {sym: Decimal("1") for sym in wanted if sym in STABLECOINS}
     remaining = wanted - set(found.keys())
@@ -163,22 +166,65 @@ def refresh_crypto_rates(symbols: Iterable[str] | None = None) -> int:
             remaining.discard(symbol)
             _sleep_between_requests()
 
-    with _lock:
-        _prices_usd.update(found)
-        global _updated_at
-        _updated_at = time.time()
-
     if remaining:
         logger.warning("CoinLore: no USD price for symbols: %s", ", ".join(sorted(remaining)))
-    logger.info("CoinLore rates refreshed: %s symbols cached", len(_prices_usd))
-    return len(found)
+    return found
+
+
+def save_rates_to_db(rates: dict[str, Decimal]) -> int:
+    if not rates:
+        return 0
+    now = datetime.now(timezone.utc)
+    with session_scope() as session:
+        for symbol, price in rates.items():
+            row = session.get(CryptoExchangeRate, symbol)
+            price_str = format(price.normalize(), "f")
+            if row is None:
+                session.add(CryptoExchangeRate(currency=symbol, price_usdt=price_str, updated_at=now))
+            else:
+                row.price_usdt = price_str
+                row.updated_at = now
+    return len(rates)
+
+
+def refresh_crypto_rates(symbols: Iterable[str] | None = None) -> int:
+    wanted = {str(item or "").strip().upper() for item in (symbols or collect_tracked_symbols()) if str(item or "").strip()}
+    if not wanted:
+        wanted = set(STABLECOINS)
+    found = _fetch_coinlore_prices(wanted)
+    saved = save_rates_to_db(found)
+    logger.info("CoinLore rates saved to DB: %s symbols", saved)
+    return saved
+
+
+def list_stored_rates(*, symbols: Iterable[str] | None = None) -> list[dict]:
+    filter_symbols = None
+    if symbols is not None:
+        filter_symbols = {str(item or "").strip().upper() for item in symbols if str(item or "").strip()}
+    with session_scope() as session:
+        rows = list(session.scalars(select(CryptoExchangeRate).order_by(CryptoExchangeRate.currency)))
+    items = []
+    for row in rows:
+        if filter_symbols is not None and row.currency not in filter_symbols:
+            continue
+        items.append(
+            {
+                "currency": row.currency,
+                "price_usdt": row.price_usdt,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+        )
+    return items
 
 
 def cache_age_seconds() -> float:
-    with _lock:
-        if _updated_at <= 0:
-            return -1.0
-        return max(0.0, time.time() - _updated_at)
+    with session_scope() as session:
+        updated_at = session.scalar(select(func.max(CryptoExchangeRate.updated_at)))
+    if updated_at is None:
+        return -1.0
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds())
 
 
 def get_usd_price(symbol: str) -> Decimal | None:
@@ -187,13 +233,15 @@ def get_usd_price(symbol: str) -> Decimal | None:
         return None
     if sym in STABLECOINS:
         return Decimal("1")
-    with _lock:
-        return _prices_usd.get(sym)
+    with session_scope() as session:
+        row = session.get(CryptoExchangeRate, sym)
+        if row is None:
+            return None
+        return _parse_price(row.price_usdt)
 
 
 def usd_to_crypto_decimal(usd_amount: str | Decimal, symbol: str) -> Decimal:
-    raw = usd_to_crypto_amount(usd_amount, symbol)
-    return Decimal(raw)
+    return Decimal(usd_to_crypto_amount(usd_amount, symbol))
 
 
 def usd_to_crypto_amount(usd_amount: str | Decimal, symbol: str) -> str:
@@ -207,10 +255,9 @@ def usd_to_crypto_amount(usd_amount: str | Decimal, symbol: str) -> str:
 
     price = get_usd_price(sym)
     if price is None:
-        age = cache_age_seconds()
-        if age < 0:
-            raise CryptoRatesError(f"Курс {sym} ещё не загружен. Подождите минуту и попробуйте снова.")
-        raise CryptoRatesError(f"Курс {sym} не найден (CoinLore). Проверьте символ или попробуйте позже.")
+        raise CryptoRatesError(
+            f"Курс {sym} не найден в базе. Сохраните настройки оплаты или подождите обновления (каждые 5 мин)."
+        )
 
     crypto_amount = usd / price
     if crypto_amount <= 0:

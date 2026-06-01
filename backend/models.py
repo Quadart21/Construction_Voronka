@@ -178,6 +178,16 @@ class AppSetting(Base):
     value: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class CryptoExchangeRate(Base):
+    """CoinLore USD/USDT price cache for checkout conversion."""
+
+    __tablename__ = "crypto_exchange_rates"
+
+    currency: Mapped[str] = mapped_column(String(32), primary_key=True)
+    price_usdt: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Lead(Base):
     __tablename__ = "leads"
 

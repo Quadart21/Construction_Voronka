@@ -18,7 +18,9 @@ const {
   isNorenCryptoAllowed,
   toggleNorenCrypto,
   norenRates,
-  norenRatesLoading
+  norenRatesLoading,
+  cryptoExchangeRates,
+  cryptoRatesLoading
 } = inject(FUNNEL_ADMIN);
 </script>
 
@@ -349,6 +351,18 @@ const {
           Выбрано: {{ state.settings.payment.noren.allowed_cryptos.length }}
         </p>
 
+        <div v-if="cryptoExchangeRates.length" class="panel panel--nested crypto-rates">
+          <h4 class="subhead">Курсы CoinLore (цена в USDT)</h4>
+          <p class="muted small">Курсы сохраняются в базе и обновляются каждые 5 минут. При выборе монеты курс подтягивается сразу.</p>
+          <ul class="crypto-rates__list">
+            <li v-for="row in cryptoExchangeRates" :key="row.currency">
+              <strong>{{ row.currency }}</strong> = {{ row.price_usdt }} USDT
+              <span v-if="row.updated_at" class="muted small"> · {{ new Date(row.updated_at).toLocaleString() }}</span>
+            </li>
+          </ul>
+        </div>
+        <p v-else-if="cryptoRatesLoading" class="muted small">Загрузка курсов CoinLore…</p>
+
         <h3 class="subhead">Защита от массовых заявок</h3>
         <p class="muted small">
           Ограничивает создание новых крипто-счетов одним пользователем. Если счёт ещё активен — показывается снова без нового запроса в Noren.
@@ -425,5 +439,9 @@ const {
 .crypto-picker__item {
   margin: 0;
   gap: 10px;
+}
+.crypto-rates__list {
+  margin: 8px 0 0;
+  padding-left: 18px;
 }
 </style>

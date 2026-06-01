@@ -831,10 +831,9 @@ async def send_noren_payment(
             merchant_order_id=merchant_order_id,
             crypto_currency=currency,
             network=network_code,
-            amount_fiat=amount_fiat,
-            fiat_currency=fiat_currency,
+            amount_crypto=amount_crypto,
+            price_usd=amount_fiat,
             metadata=local_meta,
-            expected_amount_crypto=amount_crypto,
         )
     except NorenError as exc:
         logger.warning("Noren invoice create failed: %s", exc)

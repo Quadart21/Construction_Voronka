@@ -246,10 +246,9 @@ def create_noren_invoice(
     merchant_order_id: str,
     crypto_currency: str,
     network: str,
-    amount_fiat: str,
-    fiat_currency: str = NOREN_INVOICE_FIAT,
+    amount_crypto: str,
+    price_usd: str | None = None,
     metadata: dict | None = None,
-    expected_amount_crypto: str | None = None,
 ) -> dict[str, Any]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
     if not cfg["api_key"] or not cfg["api_secret"] or not cfg["project_id"]:
@@ -259,20 +258,18 @@ def create_noren_invoice(
     if not currency or not network_code:
         raise NorenError("Выберите криптовалюту и сеть")
     invoice_meta = dict(metadata or {})
-    if expected_amount_crypto:
-        invoice_meta.setdefault("expected_amount_crypto", _parse_amount(expected_amount_crypto))
+    if price_usd:
+        invoice_meta.setdefault("price_usd", _parse_amount(price_usd))
+    invoice_meta.setdefault("amount_crypto", _parse_amount(amount_crypto))
     body = {
         "project_id": cfg["project_id"],
         "merchant_order_id": merchant_order_id,
-        "amount_fiat": _parse_amount(amount_fiat),
-        "fiat_currency": str(fiat_currency or NOREN_INVOICE_FIAT).strip().upper(),
+        "amount_fiat": _parse_amount(amount_crypto),
+        "fiat_currency": currency,
         "crypto_currency": currency,
         "network": network_code,
+        "metadata": invoice_meta,
     }
-    if expected_amount_crypto:
-        body["amount_crypto"] = _parse_amount(expected_amount_crypto)
-    if invoice_meta:
-        body["metadata"] = invoice_meta
     try:
         response = requests.post(f"{cfg['base_url']}/invoices", headers=_headers(cfg), json=body, timeout=25)
     except requests.RequestException as exc:
@@ -295,8 +292,8 @@ def extract_invoice_details(invoice: dict[str, Any], *, amount_fiat_usd: str | N
     payment_address = str(invoice.get("payment_address") or "").strip()
     qr_url = str(invoice.get("qr_url") or "").strip()
     payment_page_url = str(invoice.get("payment_page_url") or "").strip()
-    amount_fiat = str(invoice.get("amount_fiat") or amount_fiat_usd or "").strip()
-    fiat_currency = str(invoice.get("fiat_currency") or NOREN_INVOICE_FIAT).strip().upper()
+    amount_fiat = str(amount_fiat_usd or "").strip()
+    fiat_currency = NOREN_INVOICE_FIAT if amount_fiat else str(invoice.get("fiat_currency") or NOREN_INVOICE_FIAT).strip().upper()
     expires_at = str(invoice.get("expires_at") or "").strip()
     invoice_id = str(invoice.get("id") or "").strip()
     missing = [
