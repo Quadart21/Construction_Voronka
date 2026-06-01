@@ -1,3 +1,5 @@
+import logging
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -27,6 +29,7 @@ from backend.noren import (
     invoice_payment_url,
     map_noren_status,
     new_merchant_order_id,
+    rate_pair_key,
 )
 from backend.payment_settings import enabled_payment_methods, normalize_payment_settings
 from backend.payments import create_platega_payment_link
@@ -444,17 +447,20 @@ async def show_payment_method_choice(
             )
             return False
         if len(methods) == 1:
-            return await start_payment_with_method(update, context, step_id=step_id, method=methods[0])
-
-        rows = []
-        if "platega" in methods:
-            rows.append([InlineKeyboardButton("💳 Карта / СБП", callback_data=f"paym:platega:{step_id}")])
-        if "noren" in methods:
-            rows.append([InlineKeyboardButton("🪙 Криптовалюта", callback_data=f"paym:noren:{step_id}")])
-        text = html_message(
-            step.title,
-            f"{offer.get('price_text', '')}\n\nВыберите способ оплаты:",
-        )
+            only_method = methods[0]
+        else:
+            only_method = None
+            rows = []
+            if "platega" in methods:
+                rows.append([InlineKeyboardButton("💳 Карта / СБП", callback_data=f"paym:platega:{step_id}")])
+            if "noren" in methods:
+                rows.append([InlineKeyboardButton("🪙 Криптовалюта", callback_data=f"paym:noren:{step_id}")])
+            text = html_message(
+                step.title,
+                f"{offer.get('price_text', '')}\n\nВыберите способ оплаты:",
+            )
+    if only_method:
+        return await start_payment_with_method(update, context, step_id=step_id, method=only_method)
     await send_replacing_previous(
         application=context.application,
         chat_id=update.effective_chat.id,
@@ -487,69 +493,78 @@ async def show_noren_crypto_choice(
     step_id: int,
 ) -> bool:
     bot_id = bot_id_from(context.application)
+    chat_id = update.effective_chat.id
     with session_scope() as session:
         step = get_step_by_id(session, step_id, bot_id)
         if step is None:
             return False
+        step_title = step.title
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
         offer = get_setting(session, "offer", bot_id)
+        offer_price_text = str(offer.get("price_text") or "")
         noren = payment_cfg["noren"]
-        try:
-            rates = get_admin_allowed_rates(noren=noren)
-        except NorenError as exc:
-            await send_replacing_previous(
-                application=context.application,
-                chat_id=update.effective_chat.id,
-                text=html_message("Оплата криптой", str(exc)),
-                parse_mode=ParseMode.HTML,
-                protect_content=settings.content_protection_enabled,
-            )
-            return False
-        if not rates:
-            await send_replacing_previous(
-                application=context.application,
-                chat_id=update.effective_chat.id,
-                text=html_message(
-                    "Оплата криптой",
-                    "Админ не выбрал доступные криптовалюты. Отметьте их в админке → Настройки → Способы оплаты → Noren.",
-                ),
-                parse_mode=ParseMode.HTML,
-                protect_content=settings.content_protection_enabled,
-            )
-            return False
-        try:
-            price_label = noren_price_label(noren)
-        except NorenError as exc:
-            await send_replacing_previous(
-                application=context.application,
-                chat_id=update.effective_chat.id,
-                text=html_message("Оплата криптой", str(exc)),
-                parse_mode=ParseMode.HTML,
-                protect_content=settings.content_protection_enabled,
-            )
-            return False
-        if len(rates) == 1:
-            rate = rates[0]
-            return await send_noren_payment(
-                update,
-                context,
-                step_id=step_id,
-                crypto_currency=rate["currency"],
-                network=rate["network"],
-            )
-        rows = [
-            [InlineKeyboardButton(f"🪙 {rate['label']}", callback_data=f"payc:{step_id}:{rate['currency']}:{rate['network']}")]
-            for rate in rates
-        ]
-        text = html_message(
-            step.title,
-            f"{offer.get('price_text', '')}\n\n"
-            f"Сумма: <b>{price_label}</b>\n\n"
-            "Выберите криптовалюту для оплаты:",
+
+    try:
+        rates = get_admin_allowed_rates(noren=noren)
+    except NorenError as exc:
+        await send_replacing_previous(
+            application=context.application,
+            chat_id=chat_id,
+            text=html_message("Оплата криптой", str(exc)),
+            parse_mode=ParseMode.HTML,
+            protect_content=settings.content_protection_enabled,
         )
+        return False
+    if not rates:
+        await send_replacing_previous(
+            application=context.application,
+            chat_id=chat_id,
+            text=html_message(
+                "Оплата криптой",
+                "Админ не выбрал доступные криптовалюты. Отметьте их в админке → Настройки → Способы оплаты → Noren.",
+            ),
+            parse_mode=ParseMode.HTML,
+            protect_content=settings.content_protection_enabled,
+        )
+        return False
+    try:
+        price_label = noren_price_label(noren)
+    except NorenError as exc:
+        await send_replacing_previous(
+            application=context.application,
+            chat_id=chat_id,
+            text=html_message("Оплата криптой", str(exc)),
+            parse_mode=ParseMode.HTML,
+            protect_content=settings.content_protection_enabled,
+        )
+        return False
+    if len(rates) == 1:
+        rate = rates[0]
+        return await send_noren_payment(
+            update,
+            context,
+            step_id=step_id,
+            crypto_currency=rate["currency"],
+            network=rate["network"],
+        )
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"🪙 {rate['label']}",
+                callback_data=f"payc:{step_id}:{rate_pair_key(rate['currency'], rate['network'])}",
+            )
+        ]
+        for rate in rates
+    ]
+    text = html_message(
+        step_title,
+        f"{offer_price_text}\n\n"
+        f"Сумма: <b>{price_label}</b>\n\n"
+        "Выберите криптовалюту для оплаты:",
+    )
     await send_replacing_previous(
         application=context.application,
-        chat_id=update.effective_chat.id,
+        chat_id=chat_id,
         text=text,
         reply_markup=InlineKeyboardMarkup(rows),
         parse_mode=ParseMode.HTML,
@@ -655,18 +670,27 @@ async def send_noren_payment(
     network: str,
 ) -> bool:
     bot_id = bot_id_from(context.application)
+    chat_id = update.effective_chat.id
+    currency = str(crypto_currency or "").strip().upper()
+    network_code = str(network or "").strip().upper()
+    noren: dict
+    resolved_step_code: str
+    user_telegram_id: int
+    user_segment: str | None
     with session_scope() as session:
         user = get_or_create_user(session, update.effective_user, bot_id)
         step = get_step_by_id(session, step_id, bot_id)
         if step is None:
             return False
         resolved_step_code = step.code
+        user_telegram_id = user.telegram_id
+        user_segment = user.segment_key
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
         noren = payment_cfg["noren"]
-        if not is_allowed_crypto(noren=noren, crypto_currency=crypto_currency, network=network):
+        if not is_allowed_crypto(noren=noren, crypto_currency=currency, network=network_code):
             await send_replacing_previous(
                 application=context.application,
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 text=html_message("Оплата криптой", "Эта криптовалюта недоступна для оплаты."),
                 parse_mode=ParseMode.HTML,
                 protect_content=settings.content_protection_enabled,
@@ -677,7 +701,7 @@ async def send_noren_payment(
         except NorenError as exc:
             await send_replacing_previous(
                 application=context.application,
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 text=html_message("Оплата криптой", str(exc)),
                 parse_mode=ParseMode.HTML,
                 protect_content=settings.content_protection_enabled,
@@ -687,7 +711,7 @@ async def send_noren_payment(
         if decision.action == "blocked":
             await send_replacing_previous(
                 application=context.application,
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 text=html_message("Оплата криптой", decision.message),
                 parse_mode=ParseMode.HTML,
                 protect_content=settings.content_protection_enabled,
@@ -710,55 +734,58 @@ async def send_noren_payment(
                 text, keyboard = build_noren_payment_message(details, reused=True)
                 await send_replacing_previous(
                     application=context.application,
-                    chat_id=update.effective_chat.id,
+                    chat_id=chat_id,
                     text=text,
                     reply_markup=keyboard,
                     parse_mode=ParseMode.HTML,
                     protect_content=settings.content_protection_enabled,
                 )
                 return True
-        merchant_order_id = new_merchant_order_id()
-        local_meta = {
-            "bot_id": bot_id,
-            "telegram_id": user.telegram_id,
-            "segment": user.segment_key,
-            "step": resolved_step_code,
-            "merchant_order_id": merchant_order_id,
-            "crypto_currency": crypto_currency,
-            "network": network,
-        }
-        try:
-            invoice = create_noren_invoice(
-                noren=noren,
-                merchant_order_id=merchant_order_id,
-                crypto_currency=crypto_currency,
-                network=network,
-                amount_fiat=amount_fiat,
-                fiat_currency=fiat_currency,
-                metadata=local_meta,
-            )
-        except NorenError as exc:
-            await send_replacing_previous(
-                application=context.application,
-                chat_id=update.effective_chat.id,
-                text=html_message("Оплата криптой", str(exc)),
-                parse_mode=ParseMode.HTML,
-                protect_content=settings.content_protection_enabled,
-            )
-            return False
-        try:
-            details = extract_invoice_details(invoice)
-        except NorenError as exc:
-            await send_replacing_previous(
-                application=context.application,
-                chat_id=update.effective_chat.id,
-                text=html_message("Оплата криптой", str(exc)),
-                parse_mode=ParseMode.HTML,
-                protect_content=settings.content_protection_enabled,
-            )
-            return False
-        provider = crypto_provider_name()
-        order_id = details["merchant_order_id"]
+
+    merchant_order_id = new_merchant_order_id()
+    local_meta = {
+        "bot_id": bot_id,
+        "telegram_id": user_telegram_id,
+        "segment": user_segment,
+        "step": resolved_step_code,
+        "merchant_order_id": merchant_order_id,
+        "crypto_currency": currency,
+        "network": network_code,
+    }
+    try:
+        invoice = create_noren_invoice(
+            noren=noren,
+            merchant_order_id=merchant_order_id,
+            crypto_currency=currency,
+            network=network_code,
+            amount_fiat=amount_fiat,
+            fiat_currency=fiat_currency,
+            metadata=local_meta,
+        )
+    except NorenError as exc:
+        await send_replacing_previous(
+            application=context.application,
+            chat_id=chat_id,
+            text=html_message("Оплата криптой", str(exc)),
+            parse_mode=ParseMode.HTML,
+            protect_content=settings.content_protection_enabled,
+        )
+        return False
+    try:
+        details = extract_invoice_details(invoice)
+    except NorenError as exc:
+        await send_replacing_previous(
+            application=context.application,
+            chat_id=chat_id,
+            text=html_message("Оплата криптой", str(exc)),
+            parse_mode=ParseMode.HTML,
+            protect_content=settings.content_protection_enabled,
+        )
+        return False
+    provider = crypto_provider_name()
+    order_id = details["merchant_order_id"]
+    with session_scope() as session:
+        user = get_or_create_user(session, update.effective_user, bot_id)
         create_payment_record(
             session,
             user=user,
@@ -792,10 +819,10 @@ async def send_noren_payment(
             resolved_step_code,
             {"transaction_id": order_id, "provider": provider, "merchant_order_id": order_id},
         )
-        text, keyboard = build_noren_payment_message(details)
+    text, keyboard = build_noren_payment_message(details)
     await send_replacing_previous(
         application=context.application,
-        chat_id=update.effective_chat.id,
+        chat_id=chat_id,
         text=text,
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML,
@@ -820,17 +847,28 @@ async def on_noren_crypto_choice(update: Update, context: ContextTypes.DEFAULT_T
     if not await ensure_subscribed(update, context):
         return
     try:
-        _, step_id_raw, crypto_currency, network = query.data.split(":", 3)
-        step_id = int(step_id_raw)
+        parts = query.data.split(":")
+        if len(parts) >= 4 and parts[0] == "payc":
+            step_id = int(parts[1])
+            crypto_currency = parts[2]
+            network = ":".join(parts[3:])
+        elif len(parts) == 3 and parts[0] == "payc":
+            step_id = int(parts[1])
+            crypto_currency, network = parts[2].split("|", 1)
+        else:
+            raise ValueError("invalid callback")
     except (TypeError, ValueError):
+        await send_unavailable_transition(update, context)
+        return
+    if not crypto_currency.strip() or not network.strip():
         await send_unavailable_transition(update, context)
         return
     if not await send_noren_payment(
         update,
         context,
         step_id=step_id,
-        crypto_currency=crypto_currency.upper(),
-        network=network.upper(),
+        crypto_currency=crypto_currency,
+        network=network,
     ):
         await send_unavailable_transition(update, context)
 
@@ -1026,9 +1064,37 @@ async def post_init(application: Application, bot_id: int) -> None:
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
+logger = logging.getLogger(__name__)
+
+
+async def on_handler_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Telegram handler error", exc_info=context.error)
+    if not isinstance(update, Update):
+        return
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    if update.callback_query:
+        try:
+            await update.callback_query.answer("Ошибка. Попробуйте снова или /start", show_alert=True)
+        except Exception:
+            pass
+    try:
+        await send_replacing_previous(
+            application=context.application,
+            chat_id=chat_id,
+            text=html_message("Ошибка", "Что-то пошло не так. Нажмите /start или попробуйте позже."),
+            parse_mode=ParseMode.HTML,
+            protect_content=settings.content_protection_enabled,
+        )
+    except Exception:
+        pass
+
+
 def build_bot_application(token: str, bot_id: int) -> Application:
     app = Application.builder().token(token).post_init(lambda application: post_init(application, bot_id)).build()
     app.bot_data["bot_id"] = int(bot_id)
+    app.add_error_handler(on_handler_error)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_check_subscription, pattern=r"^check_sub$"))
     app.add_handler(CallbackQueryHandler(on_branch_navigation, pattern=r"^branch:"))

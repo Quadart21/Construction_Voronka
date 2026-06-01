@@ -94,8 +94,11 @@ def get_noren_rates(*, noren: dict) -> list[dict]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
     if not cfg["api_key"] or not cfg["api_secret"]:
         raise NorenError("Укажите API key и secret Noren в настройках")
-    response = requests.get(f"{cfg['base_url']}/rates", headers=_headers(cfg), timeout=20)
-    response.raise_for_status()
+    try:
+        response = requests.get(f"{cfg['base_url']}/rates", headers=_headers(cfg), timeout=20)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise NorenError(f"Не удалось получить курсы Noren: {exc}") from exc
     payload = response.json()
     items = payload.get("items") if isinstance(payload, dict) else payload
     return flatten_rates(items)
@@ -183,7 +186,10 @@ def create_noren_invoice(
         "network": network_code,
         "metadata": metadata or {},
     }
-    response = requests.post(f"{cfg['base_url']}/invoices", headers=_headers(cfg), json=body, timeout=25)
+    try:
+        response = requests.post(f"{cfg['base_url']}/invoices", headers=_headers(cfg), json=body, timeout=25)
+    except requests.RequestException as exc:
+        raise NorenError(f"Не удалось создать счёт Noren: {exc}") from exc
     if response.status_code >= 400:
         detail = response.text[:500]
         raise NorenError(f"Noren API error {response.status_code}: {detail}")
