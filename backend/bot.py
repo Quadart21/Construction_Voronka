@@ -506,7 +506,8 @@ async def show_noren_crypto_choice(
     with session_scope() as session:
         step = get_step_by_id(session, step_id, bot_id)
         if step is None:
-            return False
+            await send_unavailable_transition(update, context)
+            return True
         step_title = step.title
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
         offer = get_setting(session, "offer", bot_id)
@@ -525,7 +526,7 @@ async def show_noren_crypto_choice(
             parse_mode=ParseMode.HTML,
             protect_content=settings.content_protection_enabled,
         )
-        return False
+        return True
     try:
         price_label = noren_price_label(noren)
     except NorenError as exc:
@@ -536,7 +537,7 @@ async def show_noren_crypto_choice(
             parse_mode=ParseMode.HTML,
             protect_content=settings.content_protection_enabled,
         )
-        return False
+        return True
     if len(rates) == 1:
         rate = rates[0]
         return await send_noren_payment(
@@ -680,7 +681,8 @@ async def send_noren_payment(
         user = get_or_create_user(session, update.effective_user, bot_id)
         step = get_step_by_id(session, step_id, bot_id)
         if step is None:
-            return False
+            await send_unavailable_transition(update, context)
+            return True
         resolved_step_code = step.code
         user_telegram_id = user.telegram_id
         user_segment = user.segment_key
@@ -694,7 +696,7 @@ async def send_noren_payment(
                 parse_mode=ParseMode.HTML,
                 protect_content=settings.content_protection_enabled,
             )
-            return False
+            return True
         try:
             amount_fiat, fiat_currency = noren_checkout_fiat(noren)
         except NorenError as exc:
@@ -705,7 +707,7 @@ async def send_noren_payment(
                 parse_mode=ParseMode.HTML,
                 protect_content=settings.content_protection_enabled,
             )
-            return False
+            return True
         decision = check_crypto_invoice_creation(session, user=user, bot_id=bot_id, limits=noren)
         if decision.action == "blocked":
             await send_replacing_previous(
@@ -716,7 +718,7 @@ async def send_noren_payment(
                 protect_content=settings.content_protection_enabled,
             )
             log_event(session, user, "invoice_blocked", resolved_step_code, {"reason": decision.message})
-            return False
+            return True
         if decision.action == "reuse" and decision.record is not None:
             try:
                 details = details_from_payment_record(decision.record)
@@ -770,6 +772,7 @@ async def send_noren_payment(
             metadata=local_meta,
         )
     except NorenError as exc:
+        logger.warning("Noren invoice create failed: %s", exc)
         await send_replacing_previous(
             application=context.application,
             chat_id=chat_id,
@@ -777,10 +780,11 @@ async def send_noren_payment(
             parse_mode=ParseMode.HTML,
             protect_content=settings.content_protection_enabled,
         )
-        return False
+        return True
     try:
         details = extract_invoice_details(invoice)
     except NorenError as exc:
+        logger.warning("Noren invoice details invalid: %s", exc)
         await send_replacing_previous(
             application=context.application,
             chat_id=chat_id,
@@ -788,7 +792,7 @@ async def send_noren_payment(
             parse_mode=ParseMode.HTML,
             protect_content=settings.content_protection_enabled,
         )
-        return False
+        return True
     provider = crypto_provider_name()
     order_id = details["merchant_order_id"]
     with session_scope() as session:
@@ -870,14 +874,13 @@ async def on_noren_crypto_choice(update: Update, context: ContextTypes.DEFAULT_T
     if not crypto_currency.strip() or not network.strip():
         await send_unavailable_transition(update, context)
         return
-    if not await send_noren_payment(
+    await send_noren_payment(
         update,
         context,
         step_id=step_id,
         crypto_currency=crypto_currency,
         network=network,
-    ):
-        await send_unavailable_transition(update, context)
+    )
 
 
 async def on_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -894,8 +897,7 @@ async def on_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if method not in {"platega", "noren"}:
         await send_unavailable_transition(update, context)
         return
-    if not await start_payment_with_method(update, context, step_id=step_id, method=method):
-        await send_unavailable_transition(update, context)
+    await start_payment_with_method(update, context, step_id=step_id, method=method)
 
 
 async def on_payment_by_step_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
