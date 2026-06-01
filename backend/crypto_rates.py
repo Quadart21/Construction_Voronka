@@ -191,6 +191,11 @@ def get_usd_price(symbol: str) -> Decimal | None:
         return _prices_usd.get(sym)
 
 
+def usd_to_crypto_decimal(usd_amount: str | Decimal, symbol: str) -> Decimal:
+    raw = usd_to_crypto_amount(usd_amount, symbol)
+    return Decimal(raw)
+
+
 def usd_to_crypto_amount(usd_amount: str | Decimal, symbol: str) -> str:
     sym = str(symbol or "").strip().upper()
     try:
@@ -223,13 +228,23 @@ def crypto_choice_label(*, currency: str, network: str, usd_amount: str) -> str:
 
 
 async def run_crypto_rates_loop() -> None:
+    from backend.noren_limits import refresh_noren_deposit_limits
+
     try:
         await asyncio.to_thread(refresh_crypto_rates)
     except Exception:
         logger.exception("Initial CoinLore rates refresh failed")
+    try:
+        await asyncio.to_thread(refresh_noren_deposit_limits)
+    except Exception:
+        logger.exception("Initial Noren deposit limits refresh failed")
     while True:
         await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
         try:
             await asyncio.to_thread(refresh_crypto_rates)
         except Exception:
             logger.exception("CoinLore rates refresh failed")
+        try:
+            await asyncio.to_thread(refresh_noren_deposit_limits)
+        except Exception:
+            logger.exception("Noren deposit limits refresh failed")

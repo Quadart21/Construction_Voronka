@@ -13,7 +13,8 @@ from telegram.ext import (
     filters,
 )
 
-from backend.crypto_rates import CryptoRatesError, crypto_choice_label, usd_to_crypto_amount
+from backend.crypto_rates import CryptoRatesError, crypto_choice_label, usd_to_crypto_amount, usd_to_crypto_decimal
+from backend.noren_limits import checkout_minimum_error
 from backend.config import settings
 from backend.database import session_scope
 from backend.formatting import html_media_caption, html_message
@@ -496,6 +497,24 @@ async def start_payment_with_method(
     return False
 
 
+def _filter_rates_by_minimum(rates: list[dict], amount_usd: str) -> list[dict]:
+    eligible: list[dict] = []
+    for rate in rates:
+        try:
+            crypto_amount = usd_to_crypto_decimal(amount_usd, rate["currency"])
+        except CryptoRatesError:
+            eligible.append(rate)
+            continue
+        if checkout_minimum_error(
+            usd_amount=amount_usd,
+            currency=rate["currency"],
+            network=rate["network"],
+            crypto_amount=crypto_amount,
+        ) is None:
+            eligible.append(rate)
+    return eligible
+
+
 async def show_noren_crypto_choice(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -536,6 +555,20 @@ async def show_noren_crypto_choice(
             application=context.application,
             chat_id=chat_id,
             text=html_message("Оплата криптой", str(exc)),
+            parse_mode=ParseMode.HTML,
+            protect_content=settings.content_protection_enabled,
+        )
+        return True
+    rates = _filter_rates_by_minimum(rates, amount_usd)
+    if not rates:
+        await send_replacing_previous(
+            application=context.application,
+            chat_id=chat_id,
+            text=html_message(
+                "Оплата криптой",
+                "Для текущей цены все выбранные монеты ниже минимума провайдера.\n"
+                "Увеличьте цену Noren в админке или оставьте USDT/USDC.",
+            ),
             parse_mode=ParseMode.HTML,
             protect_content=settings.content_protection_enabled,
         )
@@ -712,11 +745,27 @@ async def send_noren_payment(
             return True
         try:
             amount_crypto = usd_to_crypto_amount(amount_fiat, currency)
+            crypto_decimal = usd_to_crypto_decimal(amount_fiat, currency)
         except CryptoRatesError as exc:
             await send_replacing_previous(
                 application=context.application,
                 chat_id=chat_id,
                 text=html_message("Оплата криптой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return True
+        min_error = checkout_minimum_error(
+            usd_amount=amount_fiat,
+            currency=currency,
+            network=network_code,
+            crypto_amount=crypto_decimal,
+        )
+        if min_error:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=chat_id,
+                text=html_message("Оплата криптой", min_error),
                 parse_mode=ParseMode.HTML,
                 protect_content=settings.content_protection_enabled,
             )

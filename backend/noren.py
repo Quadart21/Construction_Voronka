@@ -11,6 +11,7 @@ import requests
 
 from backend.config import settings
 from backend.payment_settings import normalize_payment_settings
+from backend.noren_limits import humanize_provider_error
 
 
 class NorenError(RuntimeError):
@@ -188,6 +189,10 @@ def _format_api_error(response: requests.Response) -> str:
     except ValueError:
         return response.text[:500]
     if isinstance(payload, dict):
+        for key in ("message", "detail", "provider_errors"):
+            value = payload.get(key)
+            if value:
+                return humanize_provider_error(str(value))
         detail = payload.get("detail")
         if isinstance(detail, list):
             parts = []
@@ -199,8 +204,8 @@ def _format_api_error(response: requests.Response) -> str:
             if parts:
                 return "; ".join(parts)
         if detail is not None:
-            return str(detail)
-    return response.text[:500]
+            return humanize_provider_error(str(detail))
+    return humanize_provider_error(response.text[:500])
 
 
 def create_noren_invoice(
@@ -231,10 +236,11 @@ def create_noren_invoice(
         "fiat_currency": str(fiat_currency or NOREN_INVOICE_FIAT).strip().upper(),
         "crypto_currency": currency,
         "network": network_code,
-        "metadata": invoice_meta or None,
     }
-    if body["metadata"] is None:
-        body.pop("metadata")
+    if expected_amount_crypto:
+        body["amount_crypto"] = _parse_amount(expected_amount_crypto)
+    if invoice_meta:
+        body["metadata"] = invoice_meta
     try:
         response = requests.post(f"{cfg['base_url']}/invoices", headers=_headers(cfg), json=body, timeout=25)
     except requests.RequestException as exc:
