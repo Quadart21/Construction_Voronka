@@ -700,7 +700,7 @@ async def send_noren_payment(
             )
             return True
         try:
-            amount_fiat, _fiat_currency = noren_checkout_fiat(noren)
+            amount_fiat, fiat_currency = noren_checkout_fiat(noren)
         except NorenError as exc:
             await send_replacing_previous(
                 application=context.application,
@@ -782,9 +782,10 @@ async def send_noren_payment(
             merchant_order_id=merchant_order_id,
             crypto_currency=currency,
             network=network_code,
-            amount_crypto=amount_crypto,
-            amount_fiat_usd=amount_fiat,
+            amount_fiat=amount_fiat,
+            fiat_currency=fiat_currency,
             metadata=local_meta,
+            expected_amount_crypto=amount_crypto,
         )
     except NorenError as exc:
         logger.warning("Noren invoice create failed: %s", exc)
@@ -808,6 +809,12 @@ async def send_noren_payment(
             protect_content=settings.content_protection_enabled,
         )
         return True
+    if details.get("amount_crypto") == amount_fiat and currency not in {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDP", "PYUSD"}:
+        logger.warning(
+            "Noren returned amount_crypto=%s equal to amount_fiat for %s — check Noren /rates",
+            amount_fiat,
+            currency,
+        )
     provider = crypto_provider_name()
     order_id = details["merchant_order_id"]
     with session_scope() as session:

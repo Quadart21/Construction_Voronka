@@ -182,15 +182,37 @@ def noren_price_label(noren: dict) -> str:
     return f"{amount_usd} USD"
 
 
+def _format_api_error(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text[:500]
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, list):
+            parts = []
+            for item in detail:
+                if isinstance(item, dict):
+                    loc = ".".join(str(part) for part in item.get("loc") or [])
+                    msg = str(item.get("msg") or "")
+                    parts.append(f"{loc}: {msg}".strip(": "))
+            if parts:
+                return "; ".join(parts)
+        if detail is not None:
+            return str(detail)
+    return response.text[:500]
+
+
 def create_noren_invoice(
     *,
     noren: dict,
     merchant_order_id: str,
     crypto_currency: str,
     network: str,
-    amount_crypto: str,
-    amount_fiat_usd: str | None = None,
+    amount_fiat: str,
+    fiat_currency: str = NOREN_INVOICE_FIAT,
     metadata: dict | None = None,
+    expected_amount_crypto: str | None = None,
 ) -> dict[str, Any]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
     if not cfg["api_key"] or not cfg["api_secret"] or not cfg["project_id"]:
@@ -200,23 +222,25 @@ def create_noren_invoice(
     if not currency or not network_code:
         raise NorenError("Выберите криптовалюту и сеть")
     invoice_meta = dict(metadata or {})
-    if amount_fiat_usd:
-        invoice_meta.setdefault("amount_fiat_usd", _parse_amount(amount_fiat_usd))
-        invoice_meta.setdefault("fiat_currency", NOREN_INVOICE_FIAT)
+    if expected_amount_crypto:
+        invoice_meta.setdefault("expected_amount_crypto", _parse_amount(expected_amount_crypto))
     body = {
         "project_id": cfg["project_id"],
         "merchant_order_id": merchant_order_id,
-        "amount_crypto": _parse_amount(amount_crypto),
+        "amount_fiat": _parse_amount(amount_fiat),
+        "fiat_currency": str(fiat_currency or NOREN_INVOICE_FIAT).strip().upper(),
         "crypto_currency": currency,
         "network": network_code,
-        "metadata": invoice_meta,
+        "metadata": invoice_meta or None,
     }
+    if body["metadata"] is None:
+        body.pop("metadata")
     try:
         response = requests.post(f"{cfg['base_url']}/invoices", headers=_headers(cfg), json=body, timeout=25)
     except requests.RequestException as exc:
         raise NorenError(f"Не удалось создать счёт Noren: {exc}") from exc
     if response.status_code >= 400:
-        detail = response.text[:500]
+        detail = _format_api_error(response)
         raise NorenError(f"Noren API error {response.status_code}: {detail}")
     return response.json()
 
