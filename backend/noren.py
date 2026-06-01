@@ -68,6 +68,28 @@ def get_available_rates(*, noren: dict) -> list[dict]:
     return [item for item in get_noren_rates(noren=noren) if item.get("available", True)]
 
 
+def rate_pair_key(currency: str, network: str) -> str:
+    return f"{str(currency or '').strip().upper()}|{str(network or '').strip().upper()}"
+
+
+def get_admin_allowed_rates(*, noren: dict) -> list[dict]:
+    cfg = normalize_payment_settings({"noren": noren})["noren"]
+    allowed_keys = set(cfg.get("allowed_cryptos") or [])
+    if not allowed_keys:
+        return []
+    return [
+        rate
+        for rate in get_available_rates(noren=noren)
+        if rate_pair_key(rate["currency"], rate["network"]) in allowed_keys
+    ]
+
+
+def is_allowed_crypto(*, noren: dict, crypto_currency: str, network: str) -> bool:
+    cfg = normalize_payment_settings({"noren": noren})["noren"]
+    key = rate_pair_key(crypto_currency, network)
+    return key in set(cfg.get("allowed_cryptos") or [])
+
+
 def get_noren_rates(*, noren: dict) -> list[dict]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
     if not cfg["api_key"] or not cfg["api_secret"]:

@@ -22,7 +22,8 @@ from backend.noren import (
     noren_checkout_fiat,
     noren_price_label,
     format_noren_payment_text,
-    get_available_rates,
+    get_admin_allowed_rates,
+    is_allowed_crypto,
     invoice_payment_url,
     map_noren_status,
     new_merchant_order_id,
@@ -494,7 +495,7 @@ async def show_noren_crypto_choice(
         offer = get_setting(session, "offer", bot_id)
         noren = payment_cfg["noren"]
         try:
-            rates = get_available_rates(noren=noren)
+            rates = get_admin_allowed_rates(noren=noren)
         except NorenError as exc:
             await send_replacing_previous(
                 application=context.application,
@@ -510,7 +511,7 @@ async def show_noren_crypto_choice(
                 chat_id=update.effective_chat.id,
                 text=html_message(
                     "Оплата криптой",
-                    "Noren не вернул доступных валют. Проверьте ключи API и project_id в админке.",
+                    "Админ не выбрал доступные криптовалюты. Отметьте их в админке → Настройки → Способы оплаты → Noren.",
                 ),
                 parse_mode=ParseMode.HTML,
                 protect_content=settings.content_protection_enabled,
@@ -662,6 +663,15 @@ async def send_noren_payment(
         resolved_step_code = step.code
         payment_cfg = normalize_payment_settings(get_setting(session, "payment", bot_id))
         noren = payment_cfg["noren"]
+        if not is_allowed_crypto(noren=noren, crypto_currency=crypto_currency, network=network):
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=update.effective_chat.id,
+                text=html_message("Оплата криптой", "Эта криптовалюта недоступна для оплаты."),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return False
         try:
             amount_fiat, fiat_currency = noren_checkout_fiat(noren)
         except NorenError as exc:

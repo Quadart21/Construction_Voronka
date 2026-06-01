@@ -114,6 +114,7 @@ DEFAULT_SETTINGS = {
             "price": "99",
             "price_currency": "USD",
             "usd_rub_rate": "",
+            "allowed_cryptos": [],
             "webhook_secret": "",
             "invoice_reuse_active": True,
             "invoice_max_per_hour": 3,

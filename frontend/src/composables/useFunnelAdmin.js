@@ -123,6 +123,7 @@ export function useFunnelAdmin() {
           price: "",
           price_currency: "USD",
           usd_rub_rate: "",
+          allowed_cryptos: [],
           webhook_secret: "",
           invoice_reuse_active: true,
           invoice_max_per_hour: 3,
@@ -280,6 +281,7 @@ export function useFunnelAdmin() {
         price: "",
         price_currency: "USD",
         usd_rub_rate: "",
+        allowed_cryptos: [],
         webhook_secret: "",
         invoice_reuse_active: true,
         invoice_max_per_hour: 3,
@@ -293,6 +295,7 @@ export function useFunnelAdmin() {
     if (!noren.price && noren.amount) noren.price = noren.amount;
     if (!noren.price_currency) noren.price_currency = "USD";
     if (noren.usd_rub_rate == null) noren.usd_rub_rate = "";
+    if (!Array.isArray(noren.allowed_cryptos)) noren.allowed_cryptos = [];
     if (noren.invoice_reuse_active == null) noren.invoice_reuse_active = true;
     if (noren.invoice_max_per_hour == null) noren.invoice_max_per_hour = 3;
     if (noren.invoice_cooldown_minutes == null) noren.invoice_cooldown_minutes = 5;
@@ -301,6 +304,24 @@ export function useFunnelAdmin() {
     delete noren.amount;
     delete noren.crypto_currency;
     delete noren.network;
+  }
+
+  function norenCryptoKey(rate) {
+    return `${rate.currency}|${rate.network}`;
+  }
+
+  function isNorenCryptoAllowed(rate) {
+    ensureSettingsShape();
+    return state.settings.payment.noren.allowed_cryptos.includes(norenCryptoKey(rate));
+  }
+
+  function toggleNorenCrypto(rate, checked) {
+    ensureSettingsShape();
+    const key = norenCryptoKey(rate);
+    const list = state.settings.payment.noren.allowed_cryptos;
+    const index = list.indexOf(key);
+    if (checked && index === -1) list.push(key);
+    if (!checked && index !== -1) list.splice(index, 1);
   }
 
   async function fetchNorenRates() {
@@ -1259,6 +1280,8 @@ export function useFunnelAdmin() {
     saveAutomation,
     saveSetting,
     fetchNorenRates,
+    isNorenCryptoAllowed,
+    toggleNorenCrypto,
     norenRates,
     norenRatesLoading,
     addSubscriptionChannel,

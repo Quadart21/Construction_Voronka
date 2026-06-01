@@ -15,6 +15,8 @@ const {
   addSubscriptionChannel,
   removeSubscriptionChannel,
   fetchNorenRates,
+  isNorenCryptoAllowed,
+  toggleNorenCrypto,
   norenRates,
   norenRatesLoading
 } = inject(FUNNEL_ADMIN);
@@ -323,22 +325,29 @@ const {
         </label>
 
         <div class="section-head">
-          <h3 class="subhead">Доступные валюты (превью)</h3>
+          <h3 class="subhead">Криптовалюты для пользователей</h3>
           <button type="button" class="btn btn--ghost btn--sm" :disabled="norenRatesLoading" @click="fetchNorenRates">
             {{ norenRatesLoading ? "Загрузка…" : "Загрузить из Noren" }}
           </button>
         </div>
         <p class="muted small">
-          В боте пользователь выбирает криптовалюту из списка провайдера. Noren вернёт сумму в крипте и ссылку
-          <code>payment_page_url</code>.
+          Загрузите список из Noren и отметьте, какими криптовалютами может платить пользователь. Сохраните настройки после выбора.
         </p>
 
-        <div v-if="norenRates.length" class="panel panel--nested">
-          <p v-for="rate in norenRates" :key="`${rate.currency}|${rate.network}`" class="muted small">
-            {{ rate.label }}
-          </p>
+        <div v-if="norenRates.length" class="panel panel--nested crypto-picker">
+          <label v-for="rate in norenRates" :key="`${rate.currency}|${rate.network}`" class="field field--inline-check crypto-picker__item">
+            <input
+              type="checkbox"
+              :checked="isNorenCryptoAllowed(rate)"
+              @change="toggleNorenCrypto(rate, $event.target.checked)"
+            />
+            <span>{{ rate.label }}</span>
+          </label>
         </div>
-        <p v-else class="muted small">Нажмите «Загрузить из Noren», чтобы проверить ключи и увидеть список, который увидит пользователь.</p>
+        <p v-else class="muted small">Сначала загрузите валюты из Noren, затем отметьте нужные.</p>
+        <p v-if="state.settings.payment.noren.allowed_cryptos.length" class="muted small">
+          Выбрано: {{ state.settings.payment.noren.allowed_cryptos.length }}
+        </p>
 
         <h3 class="subhead">Защита от массовых заявок</h3>
         <p class="muted small">
@@ -406,5 +415,15 @@ const {
 .subhead {
   margin: 16px 0 8px;
   font-size: 1rem;
+}
+.crypto-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+.crypto-picker__item {
+  margin: 0;
+  gap: 10px;
 }
 </style>
