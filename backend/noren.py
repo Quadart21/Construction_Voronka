@@ -72,6 +72,28 @@ def rate_pair_key(currency: str, network: str) -> str:
     return f"{str(currency or '').strip().upper()}|{str(network or '').strip().upper()}"
 
 
+def rates_from_allowed_cryptos(*, noren: dict) -> list[dict]:
+    """Build checkout options from admin settings without calling Noren /rates."""
+    cfg = normalize_payment_settings({"noren": noren})["noren"]
+    result: list[dict] = []
+    for key in cfg.get("allowed_cryptos") or []:
+        if not isinstance(key, str) or "|" not in key:
+            continue
+        currency, network = key.split("|", 1)
+        currency = currency.strip().upper()
+        network = network.strip().upper()
+        if not currency or not network:
+            continue
+        result.append(
+            {
+                "currency": currency,
+                "network": network,
+                "label": f"{currency} ({network})",
+            }
+        )
+    return result
+
+
 def get_admin_allowed_rates(*, noren: dict) -> list[dict]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
     allowed_keys = set(cfg.get("allowed_cryptos") or [])

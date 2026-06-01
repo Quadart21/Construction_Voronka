@@ -1,7 +1,9 @@
+import asyncio
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -24,8 +26,8 @@ from backend.noren import (
     noren_checkout_fiat,
     noren_price_label,
     format_noren_payment_text,
-    get_admin_allowed_rates,
     is_allowed_crypto,
+    rates_from_allowed_cryptos,
     invoice_payment_url,
     map_noren_status,
     new_merchant_order_id,
@@ -76,6 +78,13 @@ def managed_messages(application: Application) -> dict[int, int]:
         store = {}
         application.bot_data["managed_messages"] = store
     return store
+
+
+async def safe_answer_callback(query) -> None:
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
 
 
 async def send_replacing_previous(
@@ -350,7 +359,7 @@ async def send_unavailable_transition(update: Update, context: ContextTypes.DEFA
 
 async def on_branch_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     if not await ensure_subscribed(update, context):
         return
     try:
@@ -376,7 +385,7 @@ async def on_branch_navigation(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def on_next_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     if not await ensure_subscribed(update, context):
         return
     try:
@@ -402,7 +411,7 @@ async def on_next_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def on_step_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     if not await ensure_subscribed(update, context):
         return
     step_code = query.data.split(":", 1)[1]
@@ -504,17 +513,7 @@ async def show_noren_crypto_choice(
         offer_price_text = str(offer.get("price_text") or "")
         noren = payment_cfg["noren"]
 
-    try:
-        rates = get_admin_allowed_rates(noren=noren)
-    except NorenError as exc:
-        await send_replacing_previous(
-            application=context.application,
-            chat_id=chat_id,
-            text=html_message("Оплата криптой", str(exc)),
-            parse_mode=ParseMode.HTML,
-            protect_content=settings.content_protection_enabled,
-        )
-        return False
+    rates = rates_from_allowed_cryptos(noren=noren)
     if not rates:
         await send_replacing_previous(
             application=context.application,
@@ -752,8 +751,16 @@ async def send_noren_payment(
         "crypto_currency": currency,
         "network": network_code,
     }
+    await send_replacing_previous(
+        application=context.application,
+        chat_id=chat_id,
+        text=html_message("Оплата криптой", "⏳ Создаём счёт, подождите…"),
+        parse_mode=ParseMode.HTML,
+        protect_content=settings.content_protection_enabled,
+    )
     try:
-        invoice = create_noren_invoice(
+        invoice = await asyncio.to_thread(
+            create_noren_invoice,
             noren=noren,
             merchant_order_id=merchant_order_id,
             crypto_currency=currency,
@@ -843,7 +850,7 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 async def on_noren_crypto_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     if not await ensure_subscribed(update, context):
         return
     try:
@@ -875,7 +882,7 @@ async def on_noren_crypto_choice(update: Update, context: ContextTypes.DEFAULT_T
 
 async def on_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     if not await ensure_subscribed(update, context):
         return
     try:
@@ -893,7 +900,7 @@ async def on_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def on_payment_by_step_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     if not await ensure_subscribed(update, context):
         return
     try:
@@ -907,7 +914,7 @@ async def on_payment_by_step_id(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def on_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     if not await ensure_subscribed(update, context):
         return
     if not await send_payment_link(update, context, step_code=query.data.split(":", 1)[1]):
