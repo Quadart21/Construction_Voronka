@@ -37,7 +37,9 @@ async def run_api() -> None:
 
 async def main() -> None:
     bootstrap_application()
-    await asyncio.gather(run_api(), run_bots())
+    from backend.crypto_rates import run_crypto_rates_loop
+
+    await asyncio.gather(run_api(), run_bots(), run_crypto_rates_loop())
 
 
 if __name__ == "__main__":

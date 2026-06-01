@@ -146,11 +146,13 @@ def startup() -> None:
 @app.get("/api/health")
 def health():
     from backend.bootstrap import active_bot_count
+    from backend.crypto_rates import cache_age_seconds
 
     return {
         "ok": True,
         "version": settings.app_version,
         "active_bots": active_bot_count(),
+        "coinlore_rates_age_sec": cache_age_seconds(),
         "time": datetime.utcnow().isoformat(),
     }
 

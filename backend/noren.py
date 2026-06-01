@@ -188,8 +188,8 @@ def create_noren_invoice(
     merchant_order_id: str,
     crypto_currency: str,
     network: str,
-    amount_fiat: str,
-    fiat_currency: str,
+    amount_crypto: str,
+    amount_fiat_usd: str | None = None,
     metadata: dict | None = None,
 ) -> dict[str, Any]:
     cfg = normalize_payment_settings({"noren": noren})["noren"]
@@ -199,14 +199,17 @@ def create_noren_invoice(
     network_code = str(network or "").strip().upper()
     if not currency or not network_code:
         raise NorenError("Выберите криптовалюту и сеть")
+    invoice_meta = dict(metadata or {})
+    if amount_fiat_usd:
+        invoice_meta.setdefault("amount_fiat_usd", _parse_amount(amount_fiat_usd))
+        invoice_meta.setdefault("fiat_currency", NOREN_INVOICE_FIAT)
     body = {
         "project_id": cfg["project_id"],
         "merchant_order_id": merchant_order_id,
-        "amount_fiat": _parse_amount(amount_fiat),
-        "fiat_currency": NOREN_INVOICE_FIAT,
+        "amount_crypto": _parse_amount(amount_crypto),
         "crypto_currency": currency,
         "network": network_code,
-        "metadata": metadata or {},
+        "metadata": invoice_meta,
     }
     try:
         response = requests.post(f"{cfg['base_url']}/invoices", headers=_headers(cfg), json=body, timeout=25)
@@ -222,7 +225,7 @@ def new_merchant_order_id() -> str:
     return f"order-{uuid.uuid4().hex[:12]}"
 
 
-def extract_invoice_details(invoice: dict[str, Any]) -> dict[str, str]:
+def extract_invoice_details(invoice: dict[str, Any], *, amount_fiat_usd: str | None = None) -> dict[str, str]:
     merchant_order_id = str(invoice.get("merchant_order_id") or "").strip()
     amount_crypto = str(invoice.get("amount_crypto") or "").strip()
     crypto_currency = str(invoice.get("crypto_currency") or "").strip().upper()
@@ -230,8 +233,8 @@ def extract_invoice_details(invoice: dict[str, Any]) -> dict[str, str]:
     payment_address = str(invoice.get("payment_address") or "").strip()
     qr_url = str(invoice.get("qr_url") or "").strip()
     payment_page_url = str(invoice.get("payment_page_url") or "").strip()
-    amount_fiat = str(invoice.get("amount_fiat") or "").strip()
-    fiat_currency = str(invoice.get("fiat_currency") or "").strip().upper()
+    amount_fiat = str(invoice.get("amount_fiat") or amount_fiat_usd or "").strip()
+    fiat_currency = str(invoice.get("fiat_currency") or NOREN_INVOICE_FIAT).strip().upper()
     expires_at = str(invoice.get("expires_at") or "").strip()
     invoice_id = str(invoice.get("id") or "").strip()
     missing = [

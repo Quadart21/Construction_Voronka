@@ -13,6 +13,7 @@ from telegram.ext import (
     filters,
 )
 
+from backend.crypto_rates import CryptoRatesError, crypto_choice_label, usd_to_crypto_amount
 from backend.config import settings
 from backend.database import session_scope
 from backend.formatting import html_media_caption, html_message
@@ -529,6 +530,7 @@ async def show_noren_crypto_choice(
         return True
     try:
         price_label = noren_price_label(noren)
+        amount_usd, _ = noren_checkout_fiat(noren)
     except NorenError as exc:
         await send_replacing_previous(
             application=context.application,
@@ -550,7 +552,7 @@ async def show_noren_crypto_choice(
     rows = [
         [
             InlineKeyboardButton(
-                f"🪙 {rate['label']}",
+                f"🪙 {crypto_choice_label(currency=rate['currency'], network=rate['network'], usd_amount=amount_usd)}",
                 callback_data=f"payc:{step_id}:{rate_pair_key(rate['currency'], rate['network'])}",
             )
         ]
@@ -698,8 +700,19 @@ async def send_noren_payment(
             )
             return True
         try:
-            amount_fiat, fiat_currency = noren_checkout_fiat(noren)
+            amount_fiat, _fiat_currency = noren_checkout_fiat(noren)
         except NorenError as exc:
+            await send_replacing_previous(
+                application=context.application,
+                chat_id=chat_id,
+                text=html_message("Оплата криптой", str(exc)),
+                parse_mode=ParseMode.HTML,
+                protect_content=settings.content_protection_enabled,
+            )
+            return True
+        try:
+            amount_crypto = usd_to_crypto_amount(amount_fiat, currency)
+        except CryptoRatesError as exc:
             await send_replacing_previous(
                 application=context.application,
                 chat_id=chat_id,
@@ -752,6 +765,8 @@ async def send_noren_payment(
         "merchant_order_id": merchant_order_id,
         "crypto_currency": currency,
         "network": network_code,
+        "amount_crypto": amount_crypto,
+        "amount_fiat_usd": amount_fiat,
     }
     await send_replacing_previous(
         application=context.application,
@@ -767,8 +782,8 @@ async def send_noren_payment(
             merchant_order_id=merchant_order_id,
             crypto_currency=currency,
             network=network_code,
-            amount_fiat=amount_fiat,
-            fiat_currency=fiat_currency,
+            amount_crypto=amount_crypto,
+            amount_fiat_usd=amount_fiat,
             metadata=local_meta,
         )
     except NorenError as exc:
@@ -782,7 +797,7 @@ async def send_noren_payment(
         )
         return True
     try:
-        details = extract_invoice_details(invoice)
+        details = extract_invoice_details(invoice, amount_fiat_usd=amount_fiat)
     except NorenError as exc:
         logger.warning("Noren invoice details invalid: %s", exc)
         await send_replacing_previous(
