@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -11,7 +12,6 @@ import requests
 
 from backend.config import settings
 from backend.payment_settings import normalize_payment_settings
-from backend.noren_limits import humanize_provider_error
 
 
 class NorenError(RuntimeError):
@@ -181,6 +181,38 @@ def noren_price_label(noren: dict) -> str:
     if price_currency == "RUB":
         return f"{price_raw} RUB (≈ {amount_usd} USD)"
     return f"{amount_usd} USD"
+
+
+_MIN_LIMIT_RE = re.compile(
+    r"minimum limit\s+(?P<min>[\d.]+)\s+(?P<currency>[A-Z0-9]+)",
+    re.IGNORECASE,
+)
+_AMOUNT_RE = re.compile(
+    r"Amount\s+(?P<amount>[\d.]+)\s+(?P<currency>[A-Z0-9]+)",
+    re.IGNORECASE,
+)
+
+
+def humanize_provider_error(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "Ошибка провайдера оплаты."
+    if "1143" in text or "minimum limit" in text.lower():
+        min_match = _MIN_LIMIT_RE.search(text)
+        amount_match = _AMOUNT_RE.search(text)
+        if min_match:
+            minimum = min_match.group("min")
+            currency = min_match.group("currency").upper()
+            amount_part = ""
+            if amount_match:
+                amount_part = f" (запрошено {amount_match.group('amount')} {amount_match.group('currency').upper()})"
+            return (
+                f"Сумма{amount_part} меньше минимума провайдера: минимум <b>{minimum} {currency}</b>.\n"
+                f"Увеличьте цену Noren в админке или выберите другую монету (например USDT)."
+            )
+    if len(text) > 400:
+        return text[:400] + "…"
+    return text
 
 
 def _format_api_error(response: requests.Response) -> str:

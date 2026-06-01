@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import time
 from decimal import Decimal, InvalidOperation
@@ -72,38 +71,6 @@ def get_min_deposit(*, currency: str, network: str) -> Decimal | None:
     key = rate_pair_key(currency, network)
     with _lock:
         return _min_deposits.get(key)
-
-
-_MIN_LIMIT_RE = re.compile(
-    r"minimum limit\s+(?P<min>[\d.]+)\s+(?P<currency>[A-Z0-9]+)",
-    re.IGNORECASE,
-)
-_AMOUNT_RE = re.compile(
-    r"Amount\s+(?P<amount>[\d.]+)\s+(?P<currency>[A-Z0-9]+)",
-    re.IGNORECASE,
-)
-
-
-def humanize_provider_error(raw: str) -> str:
-    text = str(raw or "").strip()
-    if not text:
-        return "Ошибка провайдера оплаты."
-    if "1143" in text or "minimum limit" in text.lower():
-        min_match = _MIN_LIMIT_RE.search(text)
-        amount_match = _AMOUNT_RE.search(text)
-        if min_match:
-            minimum = min_match.group("min")
-            currency = min_match.group("currency").upper()
-            amount_part = ""
-            if amount_match:
-                amount_part = f" (запрошено {amount_match.group('amount')} {amount_match.group('currency').upper()})"
-            return (
-                f"Сумма{amount_part} меньше минимума провайдера: минимум <b>{minimum} {currency}</b>.\n"
-                f"Увеличьте цену Noren в админке или выберите другую монету (например USDT)."
-            )
-    if len(text) > 400:
-        return text[:400] + "…"
-    return text
 
 
 def checkout_minimum_error(
